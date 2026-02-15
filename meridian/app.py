@@ -1,7 +1,13 @@
+from pathlib import Path
+
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon, QPixmap, QColor
+from PySide6.QtGui import QIcon
 
 from meridian.ui.main_window import MainWindow
+from meridian.ui.style import build_stylesheet
+
+_ROOT = Path(__file__).resolve().parent.parent
+_LOGO = _ROOT / "assets" / "logo.png"
 
 
 class MeridianApp:
@@ -11,15 +17,9 @@ class MeridianApp:
         self._qt = QApplication(argv)
         self._qt.setApplicationName("Meridian")
         self._qt.setOrganizationName("Meridian")
-        self._qt.setWindowIcon(self._create_icon())
+        self._qt.setWindowIcon(QIcon(str(_LOGO)))
+        self._qt.setStyleSheet(build_stylesheet())
         self._window = MainWindow()
-
-    @staticmethod
-    def _create_icon() -> QIcon:
-        """Create a solid black square icon used for the title bar and taskbar."""
-        pixmap = QPixmap(64, 64)
-        pixmap.fill(QColor(0, 0, 0))
-        return QIcon(pixmap)
 
     def run(self) -> int:
         """Show the main window and enter the Qt event loop."""

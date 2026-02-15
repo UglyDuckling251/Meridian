@@ -1,8 +1,23 @@
 import sys
 import ctypes
+import webbrowser
+from pathlib import Path
 
-from PySide6.QtWidgets import QMainWindow, QWidget
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+)
+from PySide6.QtGui import QPalette, QColor, QPixmap, QPainter, QImage
+from PySide6.QtCore import Qt
+
+from meridian.core.config import Config
+from meridian.ui.menu_bar import MenuBar
+from meridian.ui.style import BG_BASE, BG_SURFACE, BG_ELEVATED, BORDER, FG_SECONDARY, FG_DISABLED, ACCENT_BLUE
+from meridian.ui.icons import pixmap as lucide_pixmap
+from meridian.ui.credits_dialog import CreditsDialog
+
+_ROOT = Path(__file__).resolve().parent.parent.parent
+_LOGO = _ROOT / "assets" / "logo_transparent.png"
+_REPO_URL = "https://github.com/UglyDuckling251/Meridian"
 
 # Windows constants for WM_SIZING edge detection
 if sys.platform == "win32":
@@ -52,8 +67,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self._config = Config.load()
         self._init_window()
         self._init_title_bar()
+        self._init_menu_bar()
         self._init_central_widget()
 
     # ------------------------------------------------------------------
@@ -82,16 +99,95 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _init_menu_bar(self):
+        self.setMenuBar(MenuBar(self._config, parent=self))
+
     def _init_central_widget(self):
-        """Set up the central widget with a dark background (canvas for future UI)."""
+        """Build the central area: empty state + footer."""
         central = QWidget()
         central.setAutoFillBackground(True)
-
         palette = central.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor(18, 18, 24))
+        palette.setColor(QPalette.ColorRole.Window, QColor(BG_BASE))
         central.setPalette(palette)
 
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # -- Empty state (shown when no games/emulators) ---------------
+        empty = QWidget()
+        empty.setObjectName("emptyState")
+        empty_layout = QVBoxLayout(empty)
+        empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.setSpacing(16)
+
+        # Logo — solid tint matching the text colour
+        logo_label = QLabel()
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if _LOGO.exists():
+            pm = _tint_pixmap(str(_LOGO), QColor(FG_SECONDARY), 56)
+            logo_label.setPixmap(pm)
+        empty_layout.addWidget(logo_label)
+
+        msg = QLabel("Whoops. Nothing's here but us snowmen.")
+        msg.setObjectName("emptyMessage")
+        msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(msg)
+
+        root.addWidget(empty, 1)
+
+        # -- Footer ----------------------------------------------------
+        # Use a QWidget with two overlapping layouts so the connection
+        # icon is always in the absolute center regardless of text widths.
+        footer = QWidget()
+        footer.setObjectName("footer")
+
+        # Layer 1: left version + right buttons
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(10, 0, 10, 0)
+        footer_layout.setSpacing(8)
+
+        version_label = QLabel("N/A")
+        version_label.setObjectName("footerVersion")
+        footer_layout.addWidget(version_label)
+
+        footer_layout.addStretch()
+
+        btn_repo = QPushButton("Repository")
+        btn_repo.setObjectName("footerButton")
+        btn_repo.setFlat(True)
+        btn_repo.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_repo.clicked.connect(lambda: webbrowser.open(_REPO_URL))
+        footer_layout.addWidget(btn_repo)
+
+        btn_credits = QPushButton("Credits")
+        btn_credits.setObjectName("footerButton")
+        btn_credits.setFlat(True)
+        btn_credits.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_credits.clicked.connect(self._on_credits)
+        footer_layout.addWidget(btn_credits)
+
+        # Layer 2: connection icon pinned to absolute center
+        self._conn_icon = QLabel(footer)
+        self._conn_icon.setPixmap(lucide_pixmap("wifi-off", 14, FG_DISABLED))
+        self._conn_icon.setToolTip("Not connected")
+        self._conn_icon.setFixedSize(20, 20)
+        self._conn_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Position will be updated on resize
+        footer.resizeEvent = lambda e, f=footer: self._center_conn_icon(f)
+
+        root.addWidget(footer)
+
         self.setCentralWidget(central)
+
+    def _center_conn_icon(self, footer: QWidget):
+        """Keep the connection icon at the exact center of the footer."""
+        x = (footer.width() - self._conn_icon.width()) // 2
+        y = (footer.height() - self._conn_icon.height()) // 2
+        self._conn_icon.move(x, y)
+
+    def _on_credits(self):
+        CreditsDialog(parent=self).exec()
 
     # ------------------------------------------------------------------
     # 16:9 aspect-ratio lock  (flicker-free, via native WM_SIZING)
@@ -146,3 +242,24 @@ class MainWindow(QMainWindow):
             rect.top = rect.bottom - new_h
         else:
             rect.bottom = rect.top + new_h
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def _tint_pixmap(path: str, color: QColor, width: int) -> QPixmap:
+    """Load an image, scale it, and tint all visible pixels to *color*."""
+    img = QImage(path)
+    img = img.scaledToWidth(width, Qt.TransformationMode.SmoothTransformation)
+    img = img.convertToFormat(QImage.Format.Format_ARGB32)
+
+    for y in range(img.height()):
+        for x in range(img.width()):
+            px = img.pixelColor(x, y)
+            if px.alpha() > 0:
+                img.setPixelColor(x, y, QColor(
+                    color.red(), color.green(), color.blue(), px.alpha()
+                ))
+
+    return QPixmap.fromImage(img)
