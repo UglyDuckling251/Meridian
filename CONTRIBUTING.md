@@ -2,6 +2,19 @@
 
 Thank you for your interest in contributing to Meridian. This document outlines the process and guidelines for contributing to the project.
 
+## Important Legal Notice
+
+Meridian is a game launcher and library organizer. It does **not** download, host, distribute, or include any ROMs, BIOS files, firmware, or copyrighted game data.
+
+**All contributors must adhere to the following rules:**
+
+- **Do not** submit any code, assets, links, or documentation that includes, references, or directs users to pirated content or ROM download sites.
+- **Do not** include any copyrighted game content (ROMs, BIOS files, firmware, box art ripped from copyrighted sources without permission, etc.) in any pull request.
+- **Do not** add features whose primary purpose is to facilitate the downloading, sharing, or illegal distribution of copyrighted material.
+- **Any contribution that violates these rules will be rejected immediately** and may result in a permanent ban from the project.
+
+Emulation itself is legal. Piracy is not. Please respect the intellectual property rights of game developers and publishers.
+
 ## Code of Conduct
 
 By participating in this project, you agree to treat all contributors and community members with respect. Harassment, discrimination, and toxic behavior will not be tolerated.
@@ -25,6 +38,8 @@ Feature suggestions are welcome. Please [open an issue](https://github.com/UglyD
 - A clear description of the feature and the problem it solves.
 - Any relevant examples, mockups, or references.
 - Whether you are willing to help implement it.
+
+**Note:** Feature suggestions that involve downloading, distributing, or linking to copyrighted content will not be considered.
 
 ### Submitting Code
 

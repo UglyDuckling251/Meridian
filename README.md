@@ -2,7 +2,9 @@
 
 A fully customizable, all-in-one frontend for organizing and playing your ROM collection.
 
-Meridian is a native desktop application for Windows that gives you a single, unified interface to browse, manage, and launch games across every emulated platform. Think of it as your personal game library — one app to find any game and play it instantly through the emulator of your choice.
+Meridian is a native desktop application for Windows that gives you a single, unified interface to browse, manage, and launch games across every emulated platform. Your personal, all in one game library for all things emulators.
+
+> **Legal Notice:** Meridian is a game launcher and library organizer. It does **not** download, host, distribute, or include any ROMs, BIOS files, firmware, or copyrighted game data of any kind. Users are solely responsible for ensuring that any ROM files used with Meridian are obtained **legally** and in full compliance with the laws of their jurisdiction. Please respect the intellectual property rights of game developers and publishers.
 
 ## Features
 
@@ -14,6 +16,18 @@ Meridian is a native desktop application for Windows that gives you a single, un
 - **Controller & Keyboard Support** — Navigate the entire interface without a mouse.
 - **Lightweight & Native** — Built with Python and Qt, not a web browser. Fast startup, low resource usage.
 
+## Legal Disclaimer
+
+Meridian is **strictly a frontend application**. It provides an interface for organizing and launching games through third-party emulators. Meridian does not facilitate, encourage, or condone software piracy in any form.
+
+- **Meridian does not include, bundle, or distribute any ROMs, BIOS files, or copyrighted game content.**
+- **Meridian does not provide any means to download, share, or acquire ROMs.**
+- **Users must only use ROM files that they have legally obtained** — for example, by dumping games from physical media that they personally own, or by using legally purchased digital copies where applicable.
+- **Distributing copyrighted ROMs is illegal.** The unauthorized copying and distribution of copyrighted software is a violation of intellectual property law in most jurisdictions worldwide.
+- **The developers and contributors of Meridian assume no responsibility or liability for how users obtain or use ROM files.**
+
+By using Meridian, you acknowledge and agree that it is your sole responsibility to comply with all applicable local, national, and international laws regarding ROM files and emulation.
+
 ## Getting Started
 
 ### Prerequisites
@@ -21,6 +35,7 @@ Meridian is a native desktop application for Windows that gives you a single, un
 - **Windows 10/11** (64-bit)
 - **Python 3.10+**
 - One or more emulators installed on your system
+- **Legally obtained ROM files** from platforms you own
 
 ### Installation
 
@@ -47,6 +62,8 @@ See the [Changelog](CHANGELOG.md) for a detailed history of what has been implem
 ## Contributing
 
 Contributions are welcome. Please read the [Contributing Guide](CONTRIBUTING.md) before submitting a pull request.
+
+**Important:** Do not submit any contributions that include, reference, or link to pirated content, ROM download sites, or any other illegally distributed copyrighted material. Such contributions will be rejected immediately and may result in a ban from the project.
 
 ## License
 
