@@ -573,6 +573,17 @@ def build_stylesheet(
     QListWidget::item:selected {{ background-color: {t.bg_hover}; color: #FFFFFF; }}
     QListWidget::item:hover:!selected {{ background-color: {t.bg_surface}; }}
     QListWidget::item:alternate {{ background-color: rgba(128, 128, 128, 5%); }}
+    QListWidget#gamesList {{
+        background-color: transparent;
+        border: none;
+    }}
+    QListWidget#gamesList::item {{
+        background-color: rgba(0, 0, 0, 40);
+        margin: 1px 6px;
+    }}
+    QListWidget#gamesList::item:selected {{
+        background-color: {t.bg_hover};
+    }}
 
     /* ================================================================= */
     /*  Labels                                                            */

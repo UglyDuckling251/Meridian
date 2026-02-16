@@ -14,24 +14,30 @@ disk when the user clicks Save.
 from __future__ import annotations
 
 import copy
+import shutil
+import urllib.request
+import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QStandardPaths
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QCheckBox, QListWidget, QListWidgetItem, QStackedWidget,
     QTabWidget, QPushButton, QLabel, QLineEdit, QComboBox, QSpinBox,
-    QSlider, QFileDialog, QDialogButtonBox, QGroupBox, QMessageBox,
+    QSlider, QFileDialog, QDialogButtonBox, QGroupBox, QMessageBox, QProgressDialog, QInputDialog,
+    QScrollArea, QLayout,
 )
 
 from PySide6.QtWidgets import QApplication
 
 from meridian.core.config import (
     Config, EmulatorEntry, SystemEntry,
-    KNOWN_SYSTEMS, SYSTEM_NAMES, emulators_for_system,
+    KNOWN_SYSTEMS, SYSTEM_NAMES, emulators_for_system, EMULATOR_CATALOG, EmulatorCatalogEntry,
+    emulator_catalog_entry,
     SCRAPER_SOURCES, SCRAPER_SOURCE_NAMES, SCRAPER_SOURCE_MAP,
     SCRAPER_CONTENT_LABELS, SCRAPER_ARTWORK_LABELS,
 )
+from meridian.core.emulator_install import install_emulator, emulators_root
 from meridian.ui.icons import icon as lucide_icon, pixmap as lucide_pixmap
 from meridian.ui.style import (
     active_theme, set_theme, set_density, build_stylesheet, THEME_NAMES, THEMES,
@@ -55,6 +61,162 @@ _CATEGORIES: list[tuple[str, list[str]]] = [
     ("Tools",          ["Scraper", "RetroAchievements", "File Management", "Clock"]),
     ("Adv. Settings",  ["Debug", "Experimental"]),
 ]
+
+_RETROARCH_CORE_CANDIDATES: dict[str, list[str]] = {
+    "nes": ["fceumm_libretro.dll", "nestopia_libretro.dll"],
+    "snes": ["snes9x_libretro.dll", "bsnes_libretro.dll"],
+    "n64": ["mupen64plus_next_libretro.dll", "parallel_n64_libretro.dll"],
+    "gb": ["gambatte_libretro.dll", "sameboy_libretro.dll"],
+    "gbc": ["gambatte_libretro.dll", "sameboy_libretro.dll"],
+    "gba": ["mgba_libretro.dll"],
+    "nds": ["melonds_libretro.dll", "desmume_libretro.dll"],
+    "genesis": ["genesis_plus_gx_libretro.dll", "picodrive_libretro.dll"],
+    "sms": ["genesis_plus_gx_libretro.dll", "picodrive_libretro.dll"],
+    "gg": ["genesis_plus_gx_libretro.dll", "picodrive_libretro.dll"],
+    "saturn": ["mednafen_saturn_libretro.dll"],
+    "dreamcast": ["flycast_libretro.dll"],
+    "ps1": ["duckstation_libretro.dll", "pcsx_rearmed_libretro.dll"],
+    "psp": ["ppsspp_libretro.dll"],
+    "atari7800": ["prosystem_libretro.dll"],
+    "lynx": ["handy_libretro.dll"],
+    "jaguar": ["virtualjaguar_libretro.dll"],
+    "tg16": ["mednafen_pce_fast_libretro.dll", "mednafen_pce_libretro.dll"],
+    "ngp": ["mednafen_ngp_libretro.dll"],
+    "mame": ["mame_libretro.dll", "fbneo_libretro.dll"],
+}
+
+_BIOS_REQUIREMENTS: list[dict[str, object]] = [
+    # Nintendo
+    {"id": "nes_fds_bios", "name": "Famicom Disk System BIOS", "systems": ["nes"], "required": False, "hint": "disksys.rom"},
+    {"id": "gba_bios", "name": "Game Boy Advance BIOS", "systems": ["gba"], "required": True, "hint": "gba_bios.bin"},
+    {"id": "nds_bios7", "name": "Nintendo DS BIOS7", "systems": ["nds"], "required": True, "hint": "bios7.bin"},
+    {"id": "nds_bios9", "name": "Nintendo DS BIOS9", "systems": ["nds"], "required": True, "hint": "bios9.bin"},
+    {"id": "nds_firmware", "name": "Nintendo DS Firmware", "systems": ["nds"], "required": True, "hint": "firmware.bin"},
+    {"id": "dsi_bios7", "name": "Nintendo DSi BIOS7", "systems": ["nds"], "required": False, "hint": "dsi_bios7.bin"},
+    {"id": "dsi_bios9", "name": "Nintendo DSi BIOS9", "systems": ["nds"], "required": False, "hint": "dsi_bios9.bin"},
+    {"id": "dsi_firmware", "name": "Nintendo DSi Firmware", "systems": ["nds"], "required": False, "hint": "dsi_firmware.bin"},
+    {"id": "dsi_nand", "name": "Nintendo DSi NAND", "systems": ["nds"], "required": False, "hint": "dsi_nand.bin"},
+    {"id": "n64_pif", "name": "Nintendo 64 PIF ROM", "systems": ["n64"], "required": False, "hint": "pifdata.bin"},
+    {"id": "gc_ipl", "name": "GameCube IPL BIOS", "systems": ["gc"], "required": False, "hint": "IPL.bin / gc-ipl.bin"},
+    {"id": "wii_keys", "name": "Wii Common Keys", "systems": ["wii"], "required": False, "hint": "keys.bin"},
+    {"id": "wiiu_keys", "name": "Wii U Keys", "systems": ["wiiu"], "required": True, "hint": "keys.txt"},
+    {"id": "switch_prod_keys", "name": "Nintendo Switch Prod Keys", "systems": ["switch"], "required": True, "hint": "prod.keys"},
+    {"id": "switch_title_keys", "name": "Nintendo Switch Title Keys", "systems": ["switch"], "required": False, "hint": "title.keys"},
+    {"id": "switch_firmware", "name": "Nintendo Switch Firmware", "systems": ["switch"], "required": False, "hint": "firmware/*.nca"},
+    {"id": "n3ds_aes_keys", "name": "Nintendo 3DS AES Keys", "systems": ["3ds"], "required": False, "hint": "aes_keys.txt"},
+    {"id": "n3ds_seeddb", "name": "Nintendo 3DS Seed Database", "systems": ["3ds"], "required": False, "hint": "seeddb.bin"},
+    {"id": "n3ds_boot9", "name": "Nintendo 3DS boot9", "systems": ["3ds"], "required": False, "hint": "boot9.bin"},
+    {"id": "n3ds_boot11", "name": "Nintendo 3DS boot11", "systems": ["3ds"], "required": False, "hint": "boot11.bin"},
+
+    # Sega
+    {"id": "sega_cd_us", "name": "Sega CD BIOS (USA)", "systems": ["genesis"], "required": False, "hint": "bios_CD_U.bin"},
+    {"id": "sega_cd_eu", "name": "Sega CD BIOS (Europe)", "systems": ["genesis"], "required": False, "hint": "bios_CD_E.bin"},
+    {"id": "sega_cd_jp", "name": "Sega CD BIOS (Japan)", "systems": ["genesis"], "required": False, "hint": "bios_CD_J.bin"},
+    {"id": "sega32x_m68k", "name": "Sega 32X BIOS (M68K)", "systems": ["genesis"], "required": False, "hint": "32X_G_BIOS.BIN"},
+    {"id": "sega32x_master", "name": "Sega 32X BIOS (Master SH2)", "systems": ["genesis"], "required": False, "hint": "32X_M_BIOS.BIN"},
+    {"id": "sega32x_slave", "name": "Sega 32X BIOS (Slave SH2)", "systems": ["genesis"], "required": False, "hint": "32X_S_BIOS.BIN"},
+    {"id": "saturn_bios_jp", "name": "Sega Saturn BIOS (JP)", "systems": ["saturn"], "required": True, "hint": "sega_101.bin"},
+    {"id": "saturn_bios_us_eu", "name": "Sega Saturn BIOS (US/EU)", "systems": ["saturn"], "required": True, "hint": "mpr-17933.bin"},
+    {"id": "dc_boot", "name": "Dreamcast Boot ROM", "systems": ["dreamcast"], "required": True, "hint": "dc_boot.bin"},
+    {"id": "dc_flash", "name": "Dreamcast Flash ROM", "systems": ["dreamcast"], "required": True, "hint": "dc_flash.bin"},
+    {"id": "naomi_bios", "name": "Naomi BIOS", "systems": ["dreamcast", "mame"], "required": False, "hint": "naomi.zip"},
+    {"id": "naomi2_bios", "name": "Naomi 2 BIOS", "systems": ["dreamcast", "mame"], "required": False, "hint": "naomi2.zip"},
+    {"id": "atomiswave_bios", "name": "Atomiswave BIOS", "systems": ["dreamcast", "mame"], "required": False, "hint": "awbios.zip"},
+
+    # Sony
+    {"id": "ps1_scp1001", "name": "PlayStation BIOS (USA)", "systems": ["ps1"], "required": True, "hint": "scph1001.bin / scph5501.bin"},
+    {"id": "ps1_scp5500", "name": "PlayStation BIOS (Japan)", "systems": ["ps1"], "required": False, "hint": "scph5500.bin"},
+    {"id": "ps1_scp5502", "name": "PlayStation BIOS (Europe)", "systems": ["ps1"], "required": False, "hint": "scph5502.bin"},
+    {"id": "ps1_scp700x", "name": "PlayStation BIOS (7xxx Series)", "systems": ["ps1"], "required": False, "hint": "scph7001.bin / scph7003.bin / scph7502.bin"},
+    {"id": "ps2_main", "name": "PlayStation 2 BIOS", "systems": ["ps2"], "required": True, "hint": "SCPH-xxxxx.bin"},
+    {"id": "ps2_rom1", "name": "PlayStation 2 ROM1", "systems": ["ps2"], "required": False, "hint": "rom1.bin"},
+    {"id": "ps2_rom2", "name": "PlayStation 2 ROM2", "systems": ["ps2"], "required": False, "hint": "rom2.bin"},
+    {"id": "ps2_erom", "name": "PlayStation 2 EROM", "systems": ["ps2"], "required": False, "hint": "erom.bin"},
+    {"id": "ps2_nvm", "name": "PlayStation 2 NVM", "systems": ["ps2"], "required": False, "hint": "nvm.bin"},
+    {"id": "ps3_firmware", "name": "PlayStation 3 Firmware", "systems": ["ps3"], "required": True, "hint": "PS3UPDAT.PUP"},
+    {"id": "psp_font", "name": "PSP Font Assets", "systems": ["psp"], "required": False, "hint": "flash0/font/..."},
+    {"id": "psp_flash0", "name": "PSP Flash0 Assets", "systems": ["psp"], "required": False, "hint": "flash0/..."},
+    {"id": "psvita_firmware", "name": "PS Vita Firmware Files", "systems": ["psvita"], "required": False, "hint": "os0:/vs0: dumps"},
+
+    # Microsoft
+    {"id": "xbox_bios", "name": "Original Xbox BIOS", "systems": ["xbox"], "required": False, "hint": "Complex_4627.bin / evox.bin"},
+    {"id": "xbox_eeprom", "name": "Original Xbox EEPROM", "systems": ["xbox"], "required": False, "hint": "eeprom.bin"},
+    {"id": "xbox360_nand", "name": "Xbox 360 NAND", "systems": ["xbox360"], "required": False, "hint": "nanddump.bin"},
+    {"id": "xbox360_keys", "name": "Xbox 360 Keys", "systems": ["xbox360"], "required": False, "hint": "keys.txt"},
+
+    # Atari
+    {"id": "atari7800_bios", "name": "Atari 7800 BIOS", "systems": ["atari7800"], "required": False, "hint": "7800 BIOS (U).rom"},
+    {"id": "lynx_boot", "name": "Atari Lynx Boot ROM", "systems": ["lynx"], "required": True, "hint": "lynxboot.img"},
+    {"id": "jaguar_bios", "name": "Atari Jaguar BIOS", "systems": ["jaguar"], "required": True, "hint": "jagboot.rom / j64bios.bin"},
+    {"id": "jaguar_cd_bios", "name": "Atari Jaguar CD BIOS", "systems": ["jaguar"], "required": False, "hint": "jagcd.bin"},
+
+    # NEC / Hudson
+    {"id": "tg16_syscard1", "name": "TurboGrafx-16 System Card v1", "systems": ["tg16"], "required": False, "hint": "syscard1.pce"},
+    {"id": "tg16_syscard2", "name": "TurboGrafx-16 System Card v2", "systems": ["tg16"], "required": False, "hint": "syscard2.pce"},
+    {"id": "tg16_syscard3", "name": "TurboGrafx-16 System Card v3", "systems": ["tg16"], "required": True, "hint": "syscard3.pce"},
+
+    # SNK
+    {"id": "neogeo_zip", "name": "Neo Geo BIOS", "systems": ["neogeo", "mame"], "required": True, "hint": "neogeo.zip"},
+    {"id": "ngp_bios", "name": "Neo Geo Pocket BIOS", "systems": ["ngp"], "required": False, "hint": "ngp_bios.ngp / ngpcbios.rom"},
+
+    # Arcade
+    {"id": "mame_qsound", "name": "Capcom QSound BIOS", "systems": ["mame"], "required": False, "hint": "qsound.zip"},
+    {"id": "mame_pgm", "name": "PGM BIOS", "systems": ["mame"], "required": False, "hint": "pgm.zip"},
+    {"id": "mame_cps3", "name": "CPS-3 BIOS", "systems": ["mame"], "required": False, "hint": "cps3.zip"},
+    {"id": "mame_stvbios", "name": "ST-V BIOS", "systems": ["mame"], "required": False, "hint": "stvbios.zip"},
+    {"id": "mame_hikaru", "name": "Sega Hikaru BIOS", "systems": ["mame"], "required": False, "hint": "hikaru.zip"},
+    {"id": "mame_chihiro", "name": "Sega Chihiro BIOS", "systems": ["mame"], "required": False, "hint": "chihiro.zip"},
+    {"id": "mame_model2", "name": "Sega Model 2 BIOS", "systems": ["mame"], "required": False, "hint": "model2.zip"},
+    {"id": "mame_model3", "name": "Sega Model 3 BIOS", "systems": ["mame"], "required": False, "hint": "model3.zip"},
+
+    # Other systems
+    {"id": "3do_panafz10", "name": "3DO BIOS (FZ-10)", "systems": ["3do"], "required": True, "hint": "panafz10.bin"},
+    {"id": "3do_panafz1", "name": "3DO BIOS (FZ-1)", "systems": ["3do"], "required": False, "hint": "panafz1.bin"},
+    {"id": "3do_goldstar", "name": "3DO BIOS (GoldStar)", "systems": ["3do"], "required": False, "hint": "goldstar.bin"},
+    {"id": "vectrex_bios", "name": "Vectrex BIOS", "systems": ["vectrex"], "required": True, "hint": "bios.bin"},
+    {"id": "wswan_boot", "name": "WonderSwan Boot ROM", "systems": ["wonderswan"], "required": False, "hint": "wswanboot.bin"},
+    {"id": "msx_bios", "name": "MSX BIOS", "systems": ["msx"], "required": False, "hint": "MSX.ROM"},
+    {"id": "msx2_bios", "name": "MSX2 BIOS", "systems": ["msx"], "required": False, "hint": "MSX2.ROM"},
+    {"id": "msx2ext_bios", "name": "MSX2 Extension BIOS", "systems": ["msx"], "required": False, "hint": "MSX2EXT.ROM"},
+    {"id": "msx_disk", "name": "MSX Disk BIOS", "systems": ["msx"], "required": False, "hint": "DISK.ROM"},
+    {"id": "dosbox_roms", "name": "DOSBox ROM Set", "systems": ["dos", "pc"], "required": False, "hint": "dosbox/*.rom"},
+]
+
+
+_SYSTEM_COMPANY_ORDER: list[str] = [
+    "Nintendo",
+    "Sega",
+    "Sony",
+    "Microsoft",
+    "Atari",
+    "NEC / Hudson",
+    "SNK",
+    "Arcade",
+    "PC / DOS",
+    "Other",
+]
+
+
+def _system_company(system_id: str) -> str:
+    if system_id in {"nes", "snes", "n64", "gc", "wii", "wiiu", "switch", "gb", "gbc", "gba", "nds", "3ds"}:
+        return "Nintendo"
+    if system_id in {"genesis", "saturn", "dreamcast", "sms", "gg"}:
+        return "Sega"
+    if system_id in {"ps1", "ps2", "ps3", "psp", "psvita"}:
+        return "Sony"
+    if system_id in {"xbox", "xbox360"}:
+        return "Microsoft"
+    if system_id in {"atari2600", "atari7800", "lynx", "jaguar"}:
+        return "Atari"
+    if system_id in {"tg16"}:
+        return "NEC / Hudson"
+    if system_id in {"ngp", "neogeo"}:
+        return "SNK"
+    if system_id in {"mame"}:
+        return "Arcade"
+    if system_id in {"dos", "pc"}:
+        return "PC / DOS"
+    return "Other"
 
 
 # ======================================================================
@@ -193,7 +355,7 @@ class SettingsDialog(QDialog):
                     if builder_fn
                     else _placeholder(sub_tabs[index])
                 )
-                shell.layout().addWidget(content)
+                shell.layout().addWidget(self._wrap_subtab_content(content))
                 self._building = was
 
         tabs.currentChanged.connect(_on_sub_tab)
@@ -201,6 +363,18 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(tabs)
         return page
+
+    def _wrap_subtab_content(self, content: QWidget) -> QWidget:
+        """Wrap tab content in a scroll area so larger pages never collapse."""
+        if isinstance(content, QScrollArea):
+            return content
+        if content.layout() is not None:
+            content.layout().setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(content)
+        return scroll
 
     # ------------------------------------------------------------------
     # Sidebar slot
@@ -217,6 +391,32 @@ class SettingsDialog(QDialog):
             shell.layout().addWidget(page)
             self._building = was_building
         self._pages.setCurrentIndex(index)
+
+    def navigate_to(self, category_name: str, sub_tab: str | None = None) -> None:
+        """Jump to a specific settings category/sub-tab."""
+        cat_index = next(
+            (idx for idx, (name, _subs) in enumerate(_CATEGORIES) if name == category_name),
+            -1,
+        )
+        if cat_index < 0:
+            return
+        self._sidebar.setCurrentRow(cat_index)
+
+        if not sub_tab:
+            return
+        shell = self._page_shells[cat_index]
+        if shell.layout().count() == 0:
+            return
+        page = shell.layout().itemAt(0).widget()
+        if page is None:
+            return
+        tabs = page.findChild(QTabWidget, "subTabs")
+        if tabs is None:
+            return
+        for idx in range(tabs.count()):
+            if tabs.tabText(idx) == sub_tab:
+                tabs.setCurrentIndex(idx)
+                return
 
     # ------------------------------------------------------------------
     # Page builders — each returns content widget for a subcategory tab
@@ -862,6 +1062,8 @@ class SettingsDialog(QDialog):
             from meridian.core.input_manager import InputManager
             self._input_mgr = InputManager.instance()
             self._input_mgr.ensure_ready()
+        if not hasattr(self, "_input_player_controls"):
+            self._input_player_controls: dict[int, dict[str, object]] = {}
 
         if sub.startswith("Player "):
             return self._input_player(int(sub.split()[1]))
@@ -873,7 +1075,9 @@ class SettingsDialog(QDialog):
         """Build a controller-mapping tab as a vertical list of sections."""
         from PySide6.QtWidgets import QScrollArea
 
-        defs = _PLAYER1_BINDINGS if num == 1 else {}
+        saved_input = self._cfg.input_player_settings.get(str(num), {})
+        saved_bindings = saved_input.get("bindings", {})
+        defs = saved_bindings if saved_bindings else (_PLAYER1_BINDINGS if num == 1 else {})
         mgr = self._input_mgr
         detected = mgr.controller_names()
 
@@ -896,7 +1100,7 @@ class SettingsDialog(QDialog):
         top.setSpacing(8)
 
         chk = QCheckBox("Connected")
-        chk.setChecked(num == 1)
+        chk.setChecked(bool(saved_input.get("connected", num == 1)))
 
         def _on_connected(on: bool):
             body.setEnabled(on)
@@ -908,6 +1112,10 @@ class SettingsDialog(QDialog):
         top.addWidget(QLabel("Device:"))
         dev = QComboBox()
         dev.addItems(["None", "Keyboard + Mouse", "Any Available"] + detected)
+        saved_device = str(saved_input.get("device", "Any Available"))
+        if saved_device and dev.findText(saved_device) < 0:
+            dev.addItem(saved_device)
+        dev.setCurrentIndex(max(dev.findText(saved_device), 0))
         dev.setMinimumWidth(100)
         dev.currentIndexChanged.connect(self._mark_dirty)
         top.addWidget(dev, 1)
@@ -940,6 +1148,8 @@ class SettingsDialog(QDialog):
             "Fight Stick", "Steering Wheel", "Custom",
         ])
         tcombo.setMinimumWidth(110)
+        saved_type = str(saved_input.get("type", "Pro Controller"))
+        tcombo.setCurrentIndex(max(tcombo.findText(saved_type), 0))
         tcombo.currentIndexChanged.connect(self._mark_dirty)
         top.addWidget(tcombo, 1)
 
@@ -1078,6 +1288,12 @@ class SettingsDialog(QDialog):
 
         # Set initial enabled state based on the Connected checkbox
         body.setEnabled(chk.isChecked())
+        self._input_player_controls[num] = {
+            "connected": chk,
+            "device": dev,
+            "type": tcombo,
+            "bindings": bindings,
+        }
 
         # Wrap in scroll area
         scroll = QScrollArea()
@@ -1097,6 +1313,47 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(w)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
+
+        grp_profiles = QGroupBox("Controller Profiles")
+        g_profiles = QVBoxLayout(grp_profiles)
+        g_profiles.setSpacing(8)
+        self._controller_profiles = copy.deepcopy(self._cfg.controller_profiles)
+        self._active_controller_profile = self._cfg.active_controller_profile or ""
+
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(8)
+        profile_row.addWidget(QLabel("Profile:"))
+        self._input_profile_combo = QComboBox()
+        self._input_profile_combo.addItem("(Current Unsaved)", "")
+        for name in sorted(self._controller_profiles.keys(), key=str.lower):
+            self._input_profile_combo.addItem(name, name)
+        if self._active_controller_profile:
+            idx = self._input_profile_combo.findData(self._active_controller_profile)
+            self._input_profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        profile_row.addWidget(self._input_profile_combo, 1)
+        g_profiles.addLayout(profile_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_save_profile = QPushButton("Save Current as Profile...")
+        btn_save_profile.clicked.connect(self._on_save_controller_profile)
+        btn_row.addWidget(btn_save_profile)
+        btn_load_profile = QPushButton("Load Selected")
+        btn_load_profile.clicked.connect(self._on_load_controller_profile)
+        btn_row.addWidget(btn_load_profile)
+        btn_delete_profile = QPushButton("Delete Selected")
+        btn_delete_profile.clicked.connect(self._on_delete_controller_profile)
+        btn_row.addWidget(btn_delete_profile)
+        btn_row.addStretch()
+        g_profiles.addLayout(btn_row)
+
+        profile_hint = QLabel(
+            "Profiles store controller connected/device/type assignments for Player 1-10."
+        )
+        profile_hint.setObjectName("sectionLabel")
+        profile_hint.setWordWrap(True)
+        g_profiles.addWidget(profile_hint)
+        layout.addWidget(grp_profiles)
 
         grp_opts = QGroupBox("Global Input Options")
         g_opts = QVBoxLayout(grp_opts)
@@ -1133,6 +1390,120 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
         return w
+
+    def _collect_input_player_settings(self) -> dict[str, dict[str, object]]:
+        merged = copy.deepcopy(self._cfg.input_player_settings)
+        controls = getattr(self, "_input_player_controls", {})
+        for num, widget_map in controls.items():
+            chk = widget_map.get("connected")
+            dev = widget_map.get("device")
+            typ = widget_map.get("type")
+            if not isinstance(chk, QCheckBox):
+                continue
+            if not isinstance(dev, QComboBox):
+                continue
+            if not isinstance(typ, QComboBox):
+                continue
+            bindings_map: dict[str, str] = {}
+            bind_buttons = widget_map.get("bindings")
+            if isinstance(bind_buttons, dict):
+                for key, btn in bind_buttons.items():
+                    if hasattr(btn, "text"):
+                        val = btn.text().strip()
+                        if val:
+                            bindings_map[key] = val
+            merged[str(num)] = {
+                "connected": chk.isChecked(),
+                "device": dev.currentText(),
+                "type": typ.currentText(),
+                "bindings": bindings_map,
+            }
+        return merged
+
+    def _apply_input_player_settings(self, settings_map: dict[str, dict[str, object]]) -> None:
+        self._cfg.input_player_settings = copy.deepcopy(settings_map)
+        controls = getattr(self, "_input_player_controls", {})
+        for num, widget_map in controls.items():
+            saved = settings_map.get(str(num), {})
+            chk = widget_map.get("connected")
+            dev = widget_map.get("device")
+            typ = widget_map.get("type")
+            if isinstance(chk, QCheckBox):
+                chk.setChecked(bool(saved.get("connected", num == 1)))
+            if isinstance(dev, QComboBox):
+                wanted = str(saved.get("device", "Any Available"))
+                if wanted and dev.findText(wanted) < 0:
+                    dev.addItem(wanted)
+                dev.setCurrentIndex(max(dev.findText(wanted), 0))
+            if isinstance(typ, QComboBox):
+                wanted_type = str(saved.get("type", "Pro Controller"))
+                dev_idx = typ.findText(wanted_type)
+                typ.setCurrentIndex(dev_idx if dev_idx >= 0 else 0)
+            # Restore bindings to the UI bind buttons so they aren't
+            # lost when _collect_input_player_settings runs on save.
+            saved_bindings = saved.get("bindings")
+            bind_buttons = widget_map.get("bindings")
+            if isinstance(saved_bindings, dict) and isinstance(bind_buttons, dict):
+                for key, btn in bind_buttons.items():
+                    if hasattr(btn, "set_binding"):
+                        btn.set_binding(str(saved_bindings.get(key, "")))
+
+    def _on_save_controller_profile(self) -> None:
+        name, ok = QInputDialog.getText(
+            self,
+            "Save Controller Profile",
+            "Profile name:",
+            text=self._active_controller_profile or "",
+        )
+        if not ok:
+            return
+        profile_name = name.strip()
+        if not profile_name:
+            return
+        snapshot = self._collect_input_player_settings()
+        self._controller_profiles[profile_name] = snapshot
+        self._active_controller_profile = profile_name
+        self._refresh_input_profile_combo()
+        self._mark_dirty()
+
+    def _on_load_controller_profile(self) -> None:
+        if not hasattr(self, "_input_profile_combo"):
+            return
+        profile_name = str(self._input_profile_combo.currentData() or "")
+        if not profile_name:
+            return
+        snapshot = self._controller_profiles.get(profile_name)
+        if not isinstance(snapshot, dict):
+            return
+        self._apply_input_player_settings(snapshot)
+        self._active_controller_profile = profile_name
+        self._mark_dirty()
+
+    def _on_delete_controller_profile(self) -> None:
+        if not hasattr(self, "_input_profile_combo"):
+            return
+        profile_name = str(self._input_profile_combo.currentData() or "")
+        if not profile_name:
+            return
+        self._controller_profiles.pop(profile_name, None)
+        if self._active_controller_profile == profile_name:
+            self._active_controller_profile = ""
+        self._refresh_input_profile_combo()
+        self._mark_dirty()
+
+    def _refresh_input_profile_combo(self) -> None:
+        if not hasattr(self, "_input_profile_combo"):
+            return
+        combo = self._input_profile_combo
+        current = self._active_controller_profile
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("(Current Unsaved)", "")
+        for name in sorted(self._controller_profiles.keys(), key=str.lower):
+            combo.addItem(name, name)
+        idx = combo.findData(current)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
 
     # -- Emulators -----------------------------------------------------
 
@@ -1185,12 +1556,7 @@ class SettingsDialog(QDialog):
             self._insert_installed_card(entry)
 
         if not self._cfg.emulators:
-            empty = QLabel("No emulators installed. Use Browse & Download or Add Manually.")
-            empty.setObjectName("sectionLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty.setWordWrap(True)
-            idx = self._installed_layout.count() - 1
-            self._installed_layout.insertWidget(idx, empty)
+            self._show_installed_empty_state()
 
         return w
 
@@ -1217,6 +1583,10 @@ class SettingsDialog(QDialog):
             path_lbl = QLabel(entry.path)
             path_lbl.setObjectName("sectionLabel")
             info.addWidget(path_lbl)
+        if entry.version:
+            version_lbl = QLabel(f"Version: {entry.version}")
+            version_lbl.setObjectName("sectionLabel")
+            info.addWidget(version_lbl)
         row.addLayout(info, 1)
 
         # Action buttons (icon-only)
@@ -1250,15 +1620,85 @@ class SettingsDialog(QDialog):
     def _on_emu_settings(self, entry: EmulatorEntry):
         """Open per-emulator settings dialog."""
         dlg = _EmulatorSettingsDialog(entry, self._cfg, parent=self)
-        dlg.exec()
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_installed_cards()
+            self._mark_dirty()
 
     def _on_delete_installed(self, card: QWidget, entry: EmulatorEntry):
+        confirm = QMessageBox.question(
+            self,
+            "Delete Emulator",
+            f"Delete {entry.display_name()} and all installed files from disk?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        ok, err = self._delete_emulator_files(entry)
+        if not ok:
+            QMessageBox.warning(
+                self,
+                "Delete failed",
+                f"{entry.display_name()} was removed from Meridian settings, "
+                f"but some files could not be deleted:\n{err}",
+            )
+
         if entry in self._cfg.emulators:
             self._cfg.emulators.remove(entry)
         if card in self._installed_cards:
             self._installed_cards.remove(card)
         card.setParent(None)
         card.deleteLater()
+        self._mark_dirty()
+        self._populate_browse_catalog(self._browse_filter.currentData() or "")
+        if not self._cfg.emulators:
+            self._show_installed_empty_state()
+
+    def _delete_emulator_files(self, entry: EmulatorEntry) -> tuple[bool, str]:
+        """Delete installed emulator artifacts from disk when possible."""
+        errors: list[str] = []
+        removed_any = False
+        roots_to_delete: list[Path] = []
+
+        if entry.install_dir:
+            roots_to_delete.append(Path(entry.install_dir))
+
+        if entry.path:
+            exe_path = Path(entry.path)
+            if exe_path.exists():
+                emu_root = emulators_root().resolve()
+                try:
+                    exe_resolved = exe_path.resolve()
+                    if emu_root in exe_resolved.parents:
+                        roots_to_delete.append(exe_resolved.parent)
+                    elif exe_resolved.is_file():
+                        exe_resolved.unlink()
+                        removed_any = True
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        seen: set[str] = set()
+        unique_roots: list[Path] = []
+        for root in roots_to_delete:
+            key = str(root)
+            if key not in seen:
+                seen.add(key)
+                unique_roots.append(root)
+
+        for root in unique_roots:
+            try:
+                if root.exists():
+                    shutil.rmtree(root)
+                    removed_any = True
+            except Exception as exc:
+                errors.append(f"{root}: {exc}")
+
+        if errors:
+            return False, "; ".join(errors)
+        if not removed_any:
+            return True, "No local files were present."
+        return True, ""
 
     def _emu_browse(self) -> QWidget:
         """Browse emulators by console with download buttons."""
@@ -1305,10 +1745,16 @@ class SettingsDialog(QDialog):
                 item.widget().deleteLater()
 
         installed_names = {e.name for e in self._cfg.emulators}
+        installed_ids = {e.catalog_id for e in self._cfg.emulators if e.catalog_id}
 
-        from meridian.core.config import EMULATOR_CATALOG
-        for emu_name, url, systems in EMULATOR_CATALOG:
-            if filter_system and filter_system not in systems:
+        for entry in EMULATOR_CATALOG:
+            # Core-only entries are configured through RetroArch itself.
+            if entry.install_strategy == "retroarch_core":
+                continue
+            # Only show installers that can be executed from Meridian.
+            if not entry.windows_supported or entry.install_strategy == "manual":
+                continue
+            if filter_system and filter_system not in entry.systems:
                 continue
 
             card = QWidget()
@@ -1320,19 +1766,24 @@ class SettingsDialog(QDialog):
             # Info
             info = QVBoxLayout()
             info.setSpacing(1)
-            name_lbl = QLabel(f"<b>{emu_name}</b>")
+            name_lbl = QLabel(f"<b>{entry.name}</b>")
             info.addWidget(name_lbl)
 
-            system_names = [SYSTEM_NAMES.get(s, s) for s in systems[:5]]
-            suffix = f" +{len(systems) - 5} more" if len(systems) > 5 else ""
+            system_names = [SYSTEM_NAMES.get(s, s) for s in entry.systems[:5]]
+            suffix = f" +{len(entry.systems) - 5} more" if len(entry.systems) > 5 else ""
             platforms = QLabel(", ".join(system_names) + suffix)
             platforms.setObjectName("sectionLabel")
             platforms.setWordWrap(True)
             info.addWidget(platforms)
 
+            if entry.preferred_version:
+                version_lbl = QLabel(f"Pinned version: {entry.preferred_version}")
+                version_lbl.setObjectName("sectionLabel")
+                info.addWidget(version_lbl)
+
             row.addLayout(info, 1)
 
-            if emu_name in installed_names:
+            if entry.id in installed_ids or entry.name in installed_names:
                 installed_lbl = QLabel()
                 installed_lbl.setPixmap(lucide_pixmap("circle-check", 16, active_theme().accent_secondary))
                 installed_lbl.setToolTip("Installed")
@@ -1341,8 +1792,9 @@ class SettingsDialog(QDialog):
                 btn_dl = QPushButton()
                 btn_dl.setIcon(lucide_icon("download", 14, active_theme().fg_primary))
                 btn_dl.setFixedSize(28, 28)
-                btn_dl.setToolTip(f"Download {emu_name}")
-                btn_dl.setEnabled(False)
+                btn_dl.setToolTip(f"Install {entry.name}")
+                btn_dl.setEnabled(True)
+                btn_dl.clicked.connect(lambda _, e=entry, b=btn_dl: self._on_install_catalog_entry(e, b))
                 row.addWidget(btn_dl)
 
             self._browse_layout.addWidget(card)
@@ -1353,29 +1805,459 @@ class SettingsDialog(QDialog):
         sid = self._browse_filter.currentData() or ""
         self._populate_browse_catalog(sid)
 
+    def _on_install_catalog_entry(self, catalog_entry: EmulatorCatalogEntry, btn: QPushButton):
+        btn.setEnabled(False)
+        progress = QProgressDialog(f"Installing {catalog_entry.name}...", "", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        try:
+            result = install_emulator(catalog_entry, self._cfg.emulators)
+        finally:
+            progress.close()
+            btn.setEnabled(True)
+
+        if not result.ok:
+            QMessageBox.warning(self, "Install failed", result.message)
+            return
+
+        if result.entry:
+            self._upsert_emulator(result.entry)
+            self._mark_dirty()
+
+        self._refresh_installed_cards()
+        self._populate_browse_catalog(self._browse_filter.currentData() or "")
+        QMessageBox.information(self, "Install complete", result.message)
+
+    def _upsert_emulator(self, new_entry: EmulatorEntry) -> None:
+        for idx, existing in enumerate(self._cfg.emulators):
+            same_catalog = bool(new_entry.catalog_id and new_entry.catalog_id == existing.catalog_id)
+            same_name = new_entry.name.lower() == existing.name.lower()
+            if same_catalog or same_name:
+                self._cfg.emulators[idx] = new_entry
+                return
+        self._cfg.emulators.append(new_entry)
+
+    def _refresh_installed_cards(self):
+        if not hasattr(self, "_installed_layout"):
+            return
+        while self._installed_layout.count():
+            item = self._installed_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._installed_layout.addStretch()
+        self._installed_cards = []
+        for entry in self._cfg.emulators:
+            self._insert_installed_card(entry)
+        if not self._cfg.emulators:
+            self._show_installed_empty_state()
+        self._refresh_system_emulator_controls()
+
+    def _show_installed_empty_state(self):
+        empty = QLabel("No emulators installed. Use Browse & Download or Add Manually.")
+        empty.setObjectName("sectionLabel")
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setWordWrap(True)
+        idx = self._installed_layout.count() - 1
+        self._installed_layout.insertWidget(idx, empty)
+
     def _emu_config(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        grp = QGroupBox("Defaults")
+        grp = QGroupBox("Quick Defaults")
         g = QVBoxLayout(grp)
         g.setSpacing(8)
-        g.addWidget(_disabled_check("Auto-detect installed emulators"))
-        g.addWidget(_disabled_check("Pass fullscreen flag to emulators"))
-        g.addWidget(_disabled_check("Close Meridian while emulator is running"))
+        row_all = QHBoxLayout()
+        row_all.setSpacing(8)
+        row_all.addWidget(QLabel("Set emulator for all consoles:"))
+        self._all_systems_emulator_combo = QComboBox()
+        row_all.addWidget(self._all_systems_emulator_combo, 1)
+        btn_apply_all = QPushButton("Apply to All")
+        btn_apply_all.clicked.connect(self._on_apply_emulator_all)
+        row_all.addWidget(btn_apply_all)
+        g.addLayout(row_all)
+        hint = QLabel("Only installed emulators appear. Unsupported consoles are set to None.")
+        hint.setObjectName("sectionLabel")
+        g.addWidget(hint)
         layout.addWidget(grp)
 
-        grp2 = QGroupBox("Launch")
-        g2 = QVBoxLayout(grp2)
-        g2.setSpacing(8)
-        g2.addWidget(_disabled_check("Confirm before launching game"))
-        g2.addWidget(_disabled_check("Track play time"))
-        layout.addWidget(grp2)
+        grp2 = QGroupBox("Per-Console Emulator")
+        g2_root = QVBoxLayout(grp2)
+        g2_root.setSpacing(10)
+
+        # Scrollable long list of all known consoles, grouped by company.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        section_host = QWidget()
+        section_layout = QVBoxLayout(section_host)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(10)
+
+        self._sys_emu_combos: dict[str, QComboBox] = {}
+        self._sys_core_combos: dict[str, QComboBox] = {}
+        self._sys_core_labels: dict[str, QLabel] = {}
+        self._ensure_system_entries()
+        grouped: dict[str, list[tuple[str, str]]] = {name: [] for name in _SYSTEM_COMPANY_ORDER}
+        for system_id, display_name, _ext in KNOWN_SYSTEMS:
+            grouped.setdefault(_system_company(system_id), []).append((system_id, display_name))
+
+        for company in _SYSTEM_COMPANY_ORDER:
+            systems = grouped.get(company, [])
+            if not systems:
+                continue
+            sec = QGroupBox(company)
+            sec_form = QFormLayout(sec)
+            sec_form.setSpacing(8)
+            for system_id, display_name in systems:
+                emu_combo = QComboBox()
+                emu_combo.currentIndexChanged.connect(
+                    lambda _=None, sid=system_id: self._on_system_emulator_changed(sid)
+                )
+                core_combo = QComboBox()
+                core_combo.currentIndexChanged.connect(
+                    lambda _=None, sid=system_id: self._on_system_core_changed(sid)
+                )
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(6)
+                row_layout.addWidget(emu_combo, 1)
+                core_lbl = QLabel("Core:")
+                row_layout.addWidget(core_lbl)
+                row_layout.addWidget(core_combo, 1)
+                sec_form.addRow(f"{display_name}:", row)
+                self._sys_emu_combos[system_id] = emu_combo
+                self._sys_core_combos[system_id] = core_combo
+                self._sys_core_labels[system_id] = core_lbl
+            section_layout.addWidget(sec)
+
+        section_layout.addStretch()
+        scroll.setWidget(section_host)
+        g2_root.addWidget(scroll, 1)
+        grp2.setMinimumHeight(220)
+        layout.addWidget(grp2, 2)
+
+        grp3 = QGroupBox("Launch")
+        g3 = QVBoxLayout(grp3)
+        g3.setSpacing(8)
+        g3.addWidget(_disabled_check("Confirm before launching game"))
+        g3.addWidget(_disabled_check("Track play time"))
+        layout.addWidget(grp3)
+
+        grp_bios = QGroupBox("BIOS Files")
+        bios_layout = QVBoxLayout(grp_bios)
+        bios_layout.setSpacing(8)
+        bios_hint = QLabel(
+            "Configure BIOS files used by your emulators. "
+            "Required entries are needed for normal boot; optional entries may improve compatibility."
+        )
+        bios_hint.setObjectName("sectionLabel")
+        bios_hint.setWordWrap(True)
+        bios_layout.addWidget(bios_hint)
+
+        self._bios_path_inputs: dict[str, QLineEdit] = {}
+        bios_scroll = QScrollArea()
+        bios_scroll.setWidgetResizable(True)
+        bios_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        bios_host = QWidget()
+        bios_sections_layout = QVBoxLayout(bios_host)
+        bios_sections_layout.setContentsMargins(0, 0, 0, 0)
+        bios_sections_layout.setSpacing(10)
+
+        grouped_bios: dict[str, list[dict[str, object]]] = {name: [] for name in _SYSTEM_COMPANY_ORDER}
+        for bios in _BIOS_REQUIREMENTS:
+            systems_raw = [str(s) for s in bios.get("systems", [])]
+            company = _system_company(systems_raw[0]) if systems_raw else "Other"
+            grouped_bios.setdefault(company, []).append(bios)
+
+        for company in _SYSTEM_COMPANY_ORDER:
+            bios_items = grouped_bios.get(company, [])
+            if not bios_items:
+                continue
+            sec = QGroupBox(company)
+            sec_form = QFormLayout(sec)
+            sec_form.setSpacing(8)
+            sec_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            for bios in bios_items:
+                bios_id = str(bios["id"])
+                name = str(bios["name"])
+                systems = [SYSTEM_NAMES.get(str(s), str(s).upper()) for s in bios.get("systems", [])]
+                required = bool(bios.get("required", False))
+                requirement = "Required" if required else "Optional"
+                row_label = f"{name} ({requirement})"
+
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(6)
+                path_edit = QLineEdit(str(self._cfg.bios_files.get(bios_id, "")))
+                path_edit.setPlaceholderText(str(bios.get("hint", "BIOS file path")))
+                path_edit.textChanged.connect(self._mark_dirty)
+                self._bios_path_inputs[bios_id] = path_edit
+                row_layout.addWidget(path_edit, 1)
+                btn_browse = QPushButton("Import...")
+                btn_browse.setFixedWidth(84)
+                btn_browse.clicked.connect(
+                    lambda _=None, key=bios_id: self._on_import_bios_file(key)
+                )
+                row_layout.addWidget(btn_browse)
+                sec_form.addRow(row_label + f" — {', '.join(systems)}", row)
+            bios_sections_layout.addWidget(sec)
+
+        bios_sections_layout.addStretch()
+        bios_scroll.setWidget(bios_host)
+        bios_layout.addWidget(bios_scroll, 1)
+        grp_bios.setMinimumHeight(220)
+        layout.addWidget(grp_bios, 2)
+
+        self._refresh_system_emulator_controls()
 
         layout.addStretch()
         return w
+
+    def _ensure_system_entries(self):
+        known_ids = [sid for sid, _, _ in KNOWN_SYSTEMS]
+        by_id = {s.system_id: s for s in self._cfg.systems}
+        for sid in known_ids:
+            if sid not in by_id:
+                self._cfg.systems.append(SystemEntry(system_id=sid))
+        order = {sid: idx for idx, sid in enumerate(known_ids)}
+        self._cfg.systems.sort(key=lambda s: order.get(s.system_id, 9999))
+
+    def _system_entry(self, system_id: str) -> SystemEntry:
+        for entry in self._cfg.systems:
+            if entry.system_id == system_id:
+                return entry
+        entry = SystemEntry(system_id=system_id)
+        self._cfg.systems.append(entry)
+        return entry
+
+    def _installed_independent_emulators(self) -> list[EmulatorEntry]:
+        result: list[EmulatorEntry] = []
+        for item in self._cfg.emulators:
+            catalog = emulator_catalog_entry(item.catalog_id or item.name)
+            if catalog and catalog.install_strategy == "retroarch_core":
+                continue
+            result.append(item)
+        return result
+
+    def _emulator_supports_system(self, item: EmulatorEntry, system_id: str) -> bool:
+        catalog = emulator_catalog_entry(item.catalog_id or item.name)
+        if catalog:
+            if catalog.install_strategy == "retroarch_core":
+                return False
+            return system_id in catalog.systems
+        # Manually added entries are considered user-managed and selectable.
+        return True
+
+    def _available_emulators_for_system(self, system_id: str) -> list[tuple[str, str]]:
+        options: list[tuple[str, str]] = []
+        for item in self._installed_independent_emulators():
+            if self._emulator_supports_system(item, system_id):
+                options.append((item.display_name(), item.display_name()))
+        if not options:
+            return [("None", "")]
+        options.sort(key=lambda x: x[0].lower())
+        return [("None", "")] + options
+
+    def _retroarch_entry(self) -> EmulatorEntry | None:
+        for item in self._cfg.emulators:
+            if item.catalog_id == "retroarch" or item.name.lower() == "retroarch":
+                return item
+        return None
+
+    def _available_retroarch_cores(self, system_id: str) -> list[str]:
+        retro = self._retroarch_entry()
+        cores: list[str] = []
+        if retro:
+            current = retro.system_overrides.get(system_id, "")
+            if current:
+                cores.append(current)
+            for candidate in _RETROARCH_CORE_CANDIDATES.get(system_id, []):
+                if candidate not in cores:
+                    cores.append(candidate)
+            if retro.install_dir:
+                cores_dir = Path(retro.install_dir) / "cores"
+                if cores_dir.exists():
+                    for dll in cores_dir.glob("*_libretro.dll"):
+                        name = dll.name
+                        if name not in cores:
+                            cores.append(name)
+        return cores
+
+    def _refresh_system_emulator_controls(self):
+        if not hasattr(self, "_all_systems_emulator_combo"):
+            return
+        all_options = [("None", "")]
+        for item in self._installed_independent_emulators():
+            all_options.append((item.display_name(), item.display_name()))
+        seen: set[str] = set()
+        self._all_systems_emulator_combo.blockSignals(True)
+        self._all_systems_emulator_combo.clear()
+        for label, value in all_options:
+            if value in seen:
+                continue
+            seen.add(value)
+            self._all_systems_emulator_combo.addItem(label, value)
+        self._all_systems_emulator_combo.blockSignals(False)
+
+        for sid, combo in getattr(self, "_sys_emu_combos", {}).items():
+            sys_entry = self._system_entry(sid)
+            options = self._available_emulators_for_system(sid)
+            current_value = sys_entry.emulator_name
+            combo.blockSignals(True)
+            combo.clear()
+            for label, value in options:
+                combo.addItem(label, value)
+            idx = combo.findData(current_value)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+            self._sync_core_combo_for_system(sid)
+
+    def _sync_core_combo_for_system(self, system_id: str):
+        emu_combo = self._sys_emu_combos.get(system_id)
+        core_combo = self._sys_core_combos.get(system_id)
+        core_label = self._sys_core_labels.get(system_id)
+        if not emu_combo or not core_combo or not core_label:
+            return
+        selected_name = str(emu_combo.currentData() or "")
+        is_retroarch = selected_name.lower() == "retroarch"
+        core_combo.blockSignals(True)
+        core_combo.clear()
+        core_label.setVisible(is_retroarch)
+        core_combo.setVisible(is_retroarch)
+        if is_retroarch:
+            retro = self._retroarch_entry()
+            current = ""
+            if retro:
+                current = retro.system_overrides.get(system_id, "")
+            cores = self._available_retroarch_cores(system_id)
+            if not cores:
+                cores = ["(no cores found)"]
+            for item in cores:
+                core_combo.addItem(item, item)
+            idx = core_combo.findData(current)
+            core_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        core_combo.blockSignals(False)
+
+    def _on_apply_emulator_all(self):
+        selected = str(self._all_systems_emulator_combo.currentData() or "")
+        for sid, combo in self._sys_emu_combos.items():
+            idx = combo.findData(selected)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self._on_system_emulator_changed(sid)
+        self._mark_dirty()
+
+    def _on_system_emulator_changed(self, system_id: str):
+        combo = self._sys_emu_combos.get(system_id)
+        if not combo:
+            return
+        sys_entry = self._system_entry(system_id)
+        sys_entry.emulator_name = str(combo.currentData() or "")
+        self._sync_core_combo_for_system(system_id)
+        self._mark_dirty()
+
+    def _on_system_core_changed(self, system_id: str):
+        combo = self._sys_core_combos.get(system_id)
+        retro = self._retroarch_entry()
+        if not combo or not retro:
+            return
+        core = str(combo.currentData() or "")
+        if not core or core.startswith("("):
+            return
+
+        ok, message = self._ensure_retroarch_core_installed(retro, core)
+        if not ok:
+            QMessageBox.warning(self, "RetroArch Core", message)
+            return
+
+        retro.system_overrides[system_id] = core
+        self._mark_dirty()
+
+    def _ensure_retroarch_core_installed(self, retro: EmulatorEntry, core_dll: str) -> tuple[bool, str]:
+        """Ensure selected RetroArch core DLL exists; download if missing."""
+        retro_root = Path(retro.install_dir) if retro.install_dir else Path(retro.path).parent
+        if not retro_root.exists():
+            return False, "RetroArch install directory was not found."
+
+        cores_dir = retro_root / "cores"
+        cores_dir.mkdir(parents=True, exist_ok=True)
+        target = cores_dir / core_dll
+        if target.exists():
+            return True, ""
+
+        core_zip_url = f"https://buildbot.libretro.com/nightly/windows/x86_64/latest/{core_dll}.zip"
+        progress = QProgressDialog(f"Downloading core {core_dll}...", "", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        tmp_zip = emulators_root() / "_downloads" / f"{core_dll}.zip"
+        tmp_zip.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            req = urllib.request.Request(core_zip_url, headers={"User-Agent": "Meridian/1.0"}, method="GET")
+            with urllib.request.urlopen(req, timeout=60) as res:
+                tmp_zip.write_bytes(res.read())
+            with zipfile.ZipFile(tmp_zip, "r") as zf:
+                zf.extractall(cores_dir)
+            if not target.exists():
+                return False, f"Downloaded archive but {core_dll} was not found after extraction."
+            return True, ""
+        except Exception as exc:
+            return False, f"Failed to download/install core {core_dll}: {exc}"
+        finally:
+            progress.close()
+            try:
+                tmp_zip.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _bios_storage_dir(self) -> Path:
+        base = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppConfigLocation,
+        )
+        path = Path(base) / "bios"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _on_import_bios_file(self, bios_id: str) -> None:
+        le = getattr(self, "_bios_path_inputs", {}).get(bios_id)
+        if not le:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import BIOS File",
+            le.text().strip() or "",
+            "All Files (*.*)",
+        )
+        if path:
+            src = Path(path)
+            ext = src.suffix.lower() or ".bin"
+            dest = self._bios_storage_dir() / f"{bios_id}{ext}"
+            try:
+                shutil.copy2(src, dest)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Import BIOS File",
+                    f"Failed to import BIOS file:\n{exc}",
+                )
+                return
+            le.setText(str(dest))
+            QMessageBox.information(
+                self,
+                "BIOS Imported",
+                f"Imported to Meridian BIOS storage:\n{dest}\n\n"
+                "You can now delete the original source file if desired.",
+            )
 
     # -- Networking ----------------------------------------------------
 
@@ -1959,27 +2841,24 @@ class SettingsDialog(QDialog):
         dlg = _EmulatorEditDialog(parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             entry = dlg.result_entry()
-            self._cfg.add_emulator(entry)
-            self._emu_list.addItem(f"{entry.display_name()}  —  {entry.path}")
+            self._upsert_emulator(entry)
+            self._refresh_installed_cards()
+            self._populate_browse_catalog(self._browse_filter.currentData() or "")
+            self._mark_dirty()
 
     def _on_edit_emulator(self):
-        row = self._emu_list.currentRow()
-        if row < 0:
-            return
-        entry = self._cfg.emulators[row]
-        dlg = _EmulatorEditDialog(entry=entry, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new = dlg.result_entry()
-            self._cfg.emulators[row] = new
-            self._emu_list.item(row).setText(
-                f"{new.display_name()}  —  {new.path}" if new.path else new.display_name()
-            )
+        QMessageBox.information(
+            self,
+            "Edit Emulator",
+            "Use the emulator card settings button to edit an installed emulator.",
+        )
 
     def _on_remove_emulator(self):
-        row = self._emu_list.currentRow()
-        if row >= 0:
-            self._cfg.remove_emulator(row)
-            self._emu_list.takeItem(row)
+        QMessageBox.information(
+            self,
+            "Remove Emulator",
+            "Use the trash icon on an emulator card to remove it.",
+        )
 
     # ------------------------------------------------------------------
     # Save / cancel
@@ -2037,6 +2916,24 @@ class SettingsDialog(QDialog):
             self._cfg.audio_mute = self._chk_mute.isChecked()
             self._cfg.audio_mute_background = self._chk_mute_bg.isChecked()
             self._cfg.audio_mute_unfocused_emu = self._chk_mute_unfocused.isChecked()
+
+        # Input  (page 4)
+        if hasattr(self, "_input_player_controls"):
+            self._cfg.input_player_settings = self._collect_input_player_settings()
+        if hasattr(self, "_controller_profiles"):
+            self._cfg.controller_profiles = copy.deepcopy(self._controller_profiles)
+            self._cfg.active_controller_profile = str(
+                getattr(self, "_active_controller_profile", "")
+            )
+
+        # Emulator BIOS files  (page 5 / Emulators > Configuration)
+        if hasattr(self, "_bios_path_inputs"):
+            bios_paths: dict[str, str] = {}
+            for bios_id, le in self._bios_path_inputs.items():
+                path = le.text().strip()
+                if path:
+                    bios_paths[bios_id] = path
+            self._cfg.bios_files = bios_paths
 
         # Scraper  (page 7)
         if hasattr(self, "_scraper_combo"):
@@ -2236,13 +3133,12 @@ class _EmulatorSettingsDialog(QDialog):
 
         rom_row = QHBoxLayout()
         rom_row.setSpacing(6)
-        self._txt_rom_dir = QLineEdit()
+        self._txt_rom_dir = QLineEdit(entry.rom_directory)
         self._txt_rom_dir.setPlaceholderText("Default ROM directory for this emulator (optional)")
-        self._txt_rom_dir.setEnabled(False)
         rom_row.addWidget(self._txt_rom_dir, 1)
         btn_b2 = QPushButton("Browse...")
         btn_b2.setFixedWidth(80)
-        btn_b2.setEnabled(False)
+        btn_b2.clicked.connect(self._on_browse_rom_dir)
         rom_row.addWidget(btn_b2)
         g_p.addRow("ROM directory:", rom_row)
 
@@ -2294,9 +3190,19 @@ class _EmulatorSettingsDialog(QDialog):
         if path:
             self._txt_exe.setText(path)
 
+    def _on_browse_rom_dir(self):
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Default ROM Directory",
+            self._txt_rom_dir.text().strip() or "",
+        )
+        if path:
+            self._txt_rom_dir.setText(path)
+
     def _on_save(self):
         self._entry.path = self._txt_exe.text().strip()
         self._entry.args = self._txt_args.text().strip() or '"{rom}"'
+        self._entry.rom_directory = self._txt_rom_dir.text().strip()
         self.accept()
 
 
@@ -2329,18 +3235,23 @@ def _disabled_check(text: str, checked: bool = False) -> QCheckBox:
 # ======================================================================
 
 _PLAYER1_BINDINGS: dict[str, str] = {
-    "ls_up": "Axis 1+", "ls_down": "Axis 1-",
+    # SDL2 Game Controller standard:
+    #   Axis 0 = Left X,  Axis 1 = Left Y  (positive = right / down)
+    #   Axis 2 = Right X, Axis 3 = Right Y (positive = right / down)
+    #   Axis 4 = Left Trigger, Axis 5 = Right Trigger (positive = pressed)
+    "ls_up": "Axis 1-", "ls_down": "Axis 1+",
     "ls_left": "Axis 0-", "ls_right": "Axis 0+",
     "ls_press": "Button 7",
-    "rs_up": "Axis 3+", "rs_down": "Axis 3-",
+    "rs_up": "Axis 3-", "rs_down": "Axis 3+",
     "rs_left": "Axis 2-", "rs_right": "Axis 2+",
     "rs_press": "Button 8",
     "dp_up": "Button 11", "dp_down": "Button 12",
     "dp_left": "Button 13", "dp_right": "Button 14",
-    "a": "Button 0", "b": "Button 2",
-    "x": "Button 1", "y": "Button 3",
+    # Nintendo layout: A=east(1), B=south(0), X=north(3), Y=west(2)
+    "a": "Button 1", "b": "Button 0",
+    "x": "Button 3", "y": "Button 2",
     "l": "Button 9", "r": "Button 10",
-    "zl": "Axis 4", "zr": "Axis 5",
+    "zl": "Axis 4+", "zr": "Axis 5+",
     "minus": "Button 4", "plus": "Button 6",
     "capture": "Button 15", "home": "Button 5",
     "motion": "Gyro",
