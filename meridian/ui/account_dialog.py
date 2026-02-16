@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QCheckBox, QGroupBox,
 )
 
-from meridian.ui.style import ACCENT_BLUE, FG_SECONDARY
+from meridian.ui.style import active_theme
 
 
 class AccountDialog(QDialog):
@@ -90,7 +90,7 @@ class AccountDialog(QDialog):
         layout.addWidget(btn_login)
 
         forgot = QLabel(
-            f'<a href="#" style="color:{ACCENT_BLUE}; text-decoration:none;">'
+            f'<a href="#" style="color:{active_theme().accent_primary}; text-decoration:none;">'
             f"Forgot password?</a>"
         )
         forgot.setAlignment(Qt.AlignmentFlag.AlignCenter)

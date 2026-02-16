@@ -283,8 +283,10 @@ class MenuBar(QMenuBar):
 
     def _on_settings(self):
         dlg = SettingsDialog(self._config, parent=self._window)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._config = dlg.saved_config()
+        dlg.exec()
+        # Always sync — the user may have clicked Save (which applies
+        # changes live) and then closed the dialog via Cancel / X.
+        self._config = dlg.saved_config()
 
     def _on_add_rom_directory(self):
         path = QFileDialog.getExistingDirectory(

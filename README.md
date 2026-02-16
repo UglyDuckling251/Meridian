@@ -54,4 +54,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). All PRs target the `dev` branch. Do not 
 
 ## Acknowledgments
 
-Inspired by [ES-DE](https://es-de.org/), [Playnite](https://playnite.link/), [LaunchBox](https://www.launchbox-app.com/), and [Pegasus](https://pegasus-frontend.org/).
+Inspired by [ES-DE](https://es-de.org/), [Playnite](https://playnite.link/), [LaunchBox](https://www.launchbox-app.com/), and [Pegasus](https://pegasus-frontend.org/). Bundled fonts: [Ubuntu](https://design.ubuntu.com/font) (UFL 1.0), [Roboto](https://fonts.google.com/specimen/Roboto) (OFL 1.1), [Work Sans](https://fonts.google.com/specimen/Work+Sans) (OFL 1.1). Icons: [Lucide](https://lucide.dev/) (ISC).
