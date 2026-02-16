@@ -21,6 +21,7 @@
 
 - **Unified ROM Library** — Scan and index ROMs across directories and platforms.
 - **Emulator Integration** — Launch any emulator directly with per-system defaults.
+- **Managed Emulator Installs** — Install supported emulators from `Edit > Settings > Emulators`.
 - **Metadata Scraping** — Fetch box art, screenshots, descriptions, and more.
 - **Collections & Favorites** — Custom lists, play tracking, favourites.
 - **Customizable UI** — Themes, layouts, display options.
@@ -43,6 +44,13 @@ Or double-click `run.bat`.
 ## Status
 
 Early development. Core window, menu system, settings dialog, and config persistence are in place. Game browser, emulator launching, and metadata scraping are next.
+
+## Emulator Installation
+
+- Install path: `Meridian/emulators/<emulator-folder>` (one emulator per folder).
+- Installer policy: resolves **latest stable** release at install time from official sources.
+- RetroArch policy: RetroArch is installed separately, then optional Libretro cores can be added and mapped per system.
+- Some catalog entries may require manual install when no reliable Windows release asset exists.
 
 ## Contributing
 
