@@ -4,7 +4,7 @@ Only the latest `main` branch is supported with security fixes.
 
 ## Reporting
 
-Do **not** open a public issue. Email **irontacc@gmail.com** with:
+Do **not** open a public issue. Email **xxx** with:
 
 - Description and impact of the vulnerability.
 - Steps to reproduce.
