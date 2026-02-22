@@ -13,7 +13,7 @@ As Meridian is in early development, only the latest version on the `main` branc
 
 If you discover a security vulnerability in Meridian, please report it responsibly. **Do not open a public issue.**
 
-Instead, please email the maintainer directly at: **irontacc@gmail.com**
+Instead, please email the maintainer directly at: **xxx**
 
 Include as much detail as possible:
 
