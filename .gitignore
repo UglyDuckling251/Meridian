@@ -1,32 +1,52 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 *.egg-info/
+*.egg
 dist/
 build/
-*.egg
 
-# Virtual environments
+# ── Virtual environments ─────────────────────────────────────────────
 venv/
 .venv/
 env/
 
-# IDE
+# ── Meridian runtime cache ───────────────────────────────────────────
+# Scraped artwork, extracted logos, crash logs, library state, dep stamp
+cache/
+
+# ── Installed emulators & downloads ──────────────────────────────────
+# Only extension source code (emulators/extensions/) and the package
+# init (emulators/__init__.py) belong in the repo.  Everything else
+# under emulators/ is downloaded/installed at runtime.
+emulators/*
+!emulators/__init__.py
+!emulators/extensions/
+
+# RetroArch (installed at runtime)
+retroarch/
+
+# ── IDE ──────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
+# ── OS ───────────────────────────────────────────────────────────────
 Thumbs.db
 Desktop.ini
 .DS_Store
 
-# PySide6 compiled resources
+# ── Build artifacts ──────────────────────────────────────────────────
 *.qrc.py
-
-# PyInstaller
 *.exe
 *.spec
+
+# ── Tools (downloaded at runtime) ────────────────────────────────────
+tools/
+
+# ── Misc generated files ─────────────────────────────────────────────
+query
