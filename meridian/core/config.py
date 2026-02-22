@@ -1,3 +1,7 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 """
 Persistent application configuration for Meridian.
 
@@ -36,6 +40,7 @@ def _config_dir() -> Path:
 
 KNOWN_SYSTEMS: list[tuple[str, str, str]] = [
     # (id, display_name, common_extensions)
+    # --- Nintendo ---
     ("nes",        "Nintendo Entertainment System (NES)",     ".nes,.zip"),
     ("snes",       "Super Nintendo (SNES)",                   ".sfc,.smc,.zip"),
     ("n64",        "Nintendo 64",                             ".n64,.z64,.v64,.zip"),
@@ -46,32 +51,58 @@ KNOWN_SYSTEMS: list[tuple[str, str, str]] = [
     ("gb",         "Game Boy",                                ".gb,.zip"),
     ("gbc",        "Game Boy Color",                          ".gbc,.zip"),
     ("gba",        "Game Boy Advance",                        ".gba,.zip"),
+    ("vb",         "Virtual Boy",                             ".vb,.vboy,.zip"),
     ("nds",        "Nintendo DS",                             ".nds,.zip"),
     ("3ds",        "Nintendo 3DS",                            ".3ds,.cia,.cxi"),
+    ("pokemini",   "Pokémon Mini",                            ".min,.zip"),
+    # --- Sega ---
     ("genesis",    "Sega Genesis / Mega Drive",               ".bin,.md,.gen,.zip"),
+    ("segacd",     "Sega CD / Mega CD",                       ".bin,.cue,.iso,.chd"),
+    ("sega32x",    "Sega 32X",                                ".32x,.bin,.zip"),
     ("saturn",     "Sega Saturn",                             ".iso,.bin,.cue"),
     ("dreamcast",  "Sega Dreamcast",                          ".gdi,.cdi,.chd"),
     ("sms",        "Sega Master System",                      ".sms,.zip"),
     ("gg",         "Sega Game Gear",                          ".gg,.zip"),
+    ("sg1000",     "Sega SG-1000",                            ".sg,.zip"),
+    # --- Sony ---
     ("ps1",        "PlayStation",                             ".bin,.cue,.iso,.chd"),
     ("ps2",        "PlayStation 2",                           ".iso,.bin,.chd"),
     ("ps3",        "PlayStation 3",                           ".iso,.pkg"),
     ("psp",        "PlayStation Portable",                    ".iso,.cso"),
     ("psvita",     "PlayStation Vita",                        ".vpk,.mai"),
+    # --- Microsoft ---
     ("xbox",       "Xbox",                                    ".iso,.xiso"),
     ("xbox360",    "Xbox 360",                                ".iso,.xex"),
+    # --- Atari ---
     ("atari2600",  "Atari 2600",                              ".a26,.bin,.zip"),
+    ("atari5200",  "Atari 5200",                              ".a52,.bin,.zip"),
     ("atari7800",  "Atari 7800",                              ".a78,.bin,.zip"),
     ("lynx",       "Atari Lynx",                              ".lnx,.zip"),
     ("jaguar",     "Atari Jaguar",                            ".j64,.jag,.zip"),
+    ("atarist",    "Atari ST / STE / Falcon",                 ".st,.stx,.msa,.zip"),
+    # --- NEC ---
     ("tg16",       "TurboGrafx-16 / PC Engine",              ".pce,.zip"),
+    ("pcfx",       "NEC PC-FX",                               ".bin,.cue,.iso"),
+    ("pc98",       "NEC PC-98",                                ".hdi,.fdi,.d88,.zip"),
+    # --- SNK ---
     ("ngp",        "Neo Geo Pocket",                          ".ngp,.ngc,.zip"),
     ("neogeo",     "Neo Geo (Arcade)",                        ".zip"),
+    ("neocd",      "Neo Geo CD",                              ".bin,.cue,.iso,.chd"),
+    # --- Arcade ---
     ("mame",       "MAME (Arcade)",                           ".zip"),
+    # --- Other ---
     ("3do",        "3DO Interactive",                          ".iso,.bin,.cue"),
     ("vectrex",    "Vectrex",                                 ".vec,.bin,.zip"),
     ("wonderswan", "WonderSwan / WonderSwan Color",           ".ws,.wsc,.zip"),
     ("msx",        "MSX / MSX2",                              ".rom,.mx1,.mx2,.zip"),
+    ("coleco",     "ColecoVision",                            ".col,.rom,.zip"),
+    ("intv",       "Intellivision",                           ".int,.rom,.zip"),
+    ("odyssey2",   "Magnavox Odyssey² / Videopac",            ".bin,.zip"),
+    ("channelf",   "Fairchild Channel F",                     ".bin,.chf,.zip"),
+    ("c64",        "Commodore 64",                            ".d64,.t64,.prg,.crt,.zip"),
+    ("amiga",      "Commodore Amiga",                         ".adf,.ipf,.hdf,.zip"),
+    ("cpc",        "Amstrad CPC",                             ".dsk,.sna,.tap,.zip"),
+    ("zxspec",     "ZX Spectrum",                             ".z80,.tap,.tzx,.sna,.zip"),
     ("dos",        "MS-DOS",                                  ".exe,.com,.bat"),
     ("pc",         "PC (Windows)",                            ".exe,.lnk,.url"),
 ]
@@ -102,191 +133,177 @@ class EmulatorCatalogEntry:
     preferred_download_url: str = ""   # optional pinned direct asset URL
     windows_supported: bool = True
     notes: str = ""
+    core_filename: str = ""            # DLL filename for retroarch_core entries
+    release_year: int = 0              # original release year (for sorting/display)
+
+
+def _core(cid: str, name: str, systems: list[str], dll: str, url: str = "", year: int = 0) -> EmulatorCatalogEntry:
+    """Shorthand factory for RetroArch core catalog entries."""
+    return EmulatorCatalogEntry(
+        id=cid, name=name, homepage_url=url or f"https://github.com/libretro/{cid.replace('_core', '')}",
+        systems=systems, install_strategy="retroarch_core", core_filename=dll, release_year=year,
+    )
 
 
 EMULATOR_CATALOG: list[EmulatorCatalogEntry] = [
+    # =================================================================
+    # RetroArch — required base (hidden from UI, auto-managed)
+    # =================================================================
     EmulatorCatalogEntry(
         id="retroarch",
         name="RetroArch",
         homepage_url="https://github.com/libretro/RetroArch",
-        systems=["nes", "snes", "n64", "gb", "gbc", "gba", "nds", "genesis", "sms", "gg",
-                 "saturn", "dreamcast", "ps1", "psp", "atari2600", "atari7800", "lynx",
-                 "jaguar", "tg16", "ngp", "neogeo", "mame", "3do", "vectrex", "wonderswan", "msx"],
+        systems=[],
         release_provider="direct",
-        release_source="https://buildbot.libretro.com/stable/1.22.2/windows/x86_64/RetroArch-Win64-setup.exe",
-        install_strategy="installer",
+        release_source="https://buildbot.libretro.com/stable/1.22.2/windows/x86_64/RetroArch.7z",
+        install_strategy="archive",
         install_subdir="retroarch",
         exe_candidates=["retroarch.exe"],
         default_args='-L "{core}" "{rom}"',
-        asset_include=["win64", ".exe"],
-        asset_exclude=["debug", "symbols", "source"],
+        asset_include=["win64", ".7z"],
+        asset_exclude=["debug", "symbols", "source", "setup"],
         preferred_version="1.22.2",
-        preferred_download_url="https://buildbot.libretro.com/stable/1.22.2/windows/x86_64/RetroArch-Win64-setup.exe",
+        preferred_download_url="https://buildbot.libretro.com/stable/1.22.2/windows/x86_64/RetroArch.7z",
     ),
-    EmulatorCatalogEntry(
-        id="mednafen",
-        name="Mednafen",
-        homepage_url="https://mednafen.github.io/",
-        systems=["nes", "snes", "gb", "gbc", "gba", "genesis", "saturn", "ps1", "tg16",
-                 "ngp", "lynx", "wonderswan"],
-        release_provider="direct",
-        release_source="https://mednafen.github.io/releases/files/mednafen-1.32.1-win64.zip",
-        install_strategy="archive",
-        install_subdir="mednafen",
-        exe_candidates=["mednafen.exe"],
-        asset_include=["win", ".zip"],
-        preferred_version="1.32.1",
-        preferred_download_url="https://mednafen.github.io/releases/files/mednafen-1.32.1-win64.zip",
-    ),
-    EmulatorCatalogEntry(
-        id="fceux",
-        name="FCEUX",
-        homepage_url="https://github.com/TASEmulators/fceux",
-        systems=["nes"],
-        release_provider="direct",
-        release_source="https://github.com/TASEmulators/fceux/releases/download/v2.6.6/fceux-2.6.6-win64.zip",
-        install_strategy="archive",
-        install_subdir="fceux",
-        exe_candidates=["fceux.exe"],
-        asset_include=["win", ".zip"],
-        preferred_version="2.6.6",
-        preferred_download_url="https://github.com/TASEmulators/fceux/releases/download/v2.6.6/fceux-2.6.6-win64.zip",
-    ),
-    EmulatorCatalogEntry(
-        id="nestopia_ue",
-        name="Nestopia UE",
-        homepage_url="https://github.com/0ldsk00l/nestopia",
-        systems=["nes"],
-        release_provider="direct",
-        release_source="https://github.com/0ldsk00l/nestopia/releases/download/1.53.2/nestopia_1.53.2-win32.zip",
-        install_strategy="archive",
-        install_subdir="nestopia-ue",
-        exe_candidates=["nestopia.exe"],
-        asset_include=["win", ".zip"],
-        preferred_version="1.53.2",
-        preferred_download_url="https://github.com/0ldsk00l/nestopia/releases/download/1.53.2/nestopia_1.53.2-win32.zip",
-    ),
-    EmulatorCatalogEntry(
-        id="mesen",
-        name="Mesen",
-        homepage_url="https://github.com/SourMesen/Mesen2",
-        systems=["nes"],
-        release_provider="direct",
-        release_source="https://github.com/SourMesen/Mesen2/releases/download/2.1.1/Mesen_2.1.1_Windows.zip",
-        install_strategy="archive",
-        install_subdir="mesen",
-        exe_candidates=["Mesen.exe"],
-        asset_include=["win", ".zip"],
-        preferred_version="2.1.1",
-        preferred_download_url="https://github.com/SourMesen/Mesen2/releases/download/2.1.1/Mesen_2.1.1_Windows.zip",
-    ),
-    EmulatorCatalogEntry(
-        id="snes9x",
-        name="Snes9x",
-        homepage_url="https://github.com/snes9xgit/snes9x",
-        systems=["snes"],
-        release_source="snes9xgit/snes9x",
-        install_strategy="archive",
-        install_subdir="snes9x",
-        exe_candidates=["snes9x-x64.exe", "snes9x.exe"],
-        asset_include=["win", "x64", ".zip"],
-        asset_exclude=["libretro"],
-    ),
-    EmulatorCatalogEntry(
-        id="bsnes",
-        name="bsnes",
-        homepage_url="https://github.com/bsnes-emu/bsnes",
-        systems=["snes"],
-        release_source="bsnes-emu/bsnes",
-        install_strategy="archive",
-        install_subdir="bsnes",
-        exe_candidates=["bsnes.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="higan",
-        name="higan",
-        homepage_url="https://github.com/higan-emu/higan",
-        systems=["snes"],
-        release_source="higan-emu/higan",
-        install_strategy="manual",
-        install_subdir="higan",
-        exe_candidates=["higan.exe"],
-        asset_include=["win", ".zip"],
-        notes="No reliable Windows release asset feed; install manually.",
-    ),
-    EmulatorCatalogEntry(
-        id="mesen_s",
-        name="Mesen-S",
-        homepage_url="https://github.com/SourMesen/Mesen-S",
-        systems=["snes"],
-        release_source="SourMesen/Mesen-S",
-        install_strategy="archive",
-        install_subdir="mesen-s",
-        exe_candidates=["Mesen-S.exe", "MesenS.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="mupen64plus_core",
-        name="Mupen64Plus (Core)",
-        homepage_url="https://github.com/mupen64plus/mupen64plus-core",
-        systems=["n64"],
-        release_source="mupen64plus/mupen64plus-core",
-        install_strategy="manual",
-        install_subdir="mupen64plus-core",
-        windows_supported=False,
-        notes="Core library; not a standalone frontend executable.",
-    ),
-    EmulatorCatalogEntry(
-        id="dolphin",
-        name="Dolphin",
-        homepage_url="https://dolphin-emu.org/",
-        systems=["gc", "wii"],
-        release_provider="direct",
-        release_source="https://dl.dolphin-emu.org/releases/2512/dolphin-2512-x64.7z",
-        install_strategy="archive",
-        install_subdir="dolphin",
-        exe_candidates=["Dolphin.exe"],
-        asset_include=["dolphin", "x64", ".7z"],
-        asset_exclude=["debug", "symbols", "source"],
-        preferred_version="2512",
-        preferred_download_url="https://dl.dolphin-emu.org/releases/2512/dolphin-2512-x64.7z",
-    ),
-    EmulatorCatalogEntry(
-        id="cemu",
-        name="Cemu",
-        homepage_url="https://github.com/cemu-project/Cemu",
-        systems=["wiiu"],
-        release_source="cemu-project/Cemu",
-        install_strategy="archive",
-        install_subdir="cemu",
-        exe_candidates=["Cemu.exe"],
-        asset_include=["windows", "x64", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="decaf",
-        name="Decaf",
-        homepage_url="https://github.com/decaf-emu/decaf-emu",
-        systems=["wiiu"],
-        release_source="decaf-emu/decaf-emu",
-        install_strategy="archive",
-        install_subdir="decaf",
-        exe_candidates=["decaf-qt.exe", "decaf.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="ryujinx",
-        name="Ryujinx",
-        homepage_url="https://github.com/Ryujinx-NX/Ryujinx",
-        systems=["switch"],
-        release_source="Ryujinx-NX/Ryujinx",
-        install_strategy="archive",
-        install_subdir="ryujinx",
-        exe_candidates=["Ryujinx.exe"],
-        asset_include=["windows", "x86_64", ".zip"],
-        asset_exclude=["pdb", "symbols", "debug"],
-        notes="Original Ryujinx is discontinued. Use Ryubing instead.",
-    ),
+
+    # === NES / Famicom ===
+    _core("fceumm_core",      "FCEUmm",          ["nes"],             "fceumm_libretro.dll"),
+    _core("nestopia_core",    "Nestopia UE",      ["nes"],             "nestopia_libretro.dll"),
+    _core("mesen_core",       "Mesen",            ["nes"],             "mesen_libretro.dll"),
+    _core("quicknes_core",    "QuickNES",         ["nes"],             "quicknes_libretro.dll"),
+    _core("bnes_core",        "bnes",             ["nes"],             "bnes_libretro.dll"),
+    # === SNES / Super Famicom ===
+    _core("snes9x_core",           "Snes9x",               ["snes"],  "snes9x_libretro.dll"),
+    _core("snes9x2010_core",       "Snes9x 2010",          ["snes"],  "snes9x2010_libretro.dll"),
+    _core("bsnes_core",            "bsnes",                 ["snes"],  "bsnes_libretro.dll"),
+    _core("bsnes_hd_core",         "bsnes-hd beta",        ["snes"],  "bsnes_hd_beta_libretro.dll"),
+    _core("bsnes_jg_core",         "bsnes-jg",             ["snes"],  "bsnes_jg_libretro.dll"),
+    _core("bsnes_mercury_core",    "bsnes-mercury",        ["snes"],  "bsnes_mercury_accuracy_libretro.dll"),
+    _core("beetle_supafaust_core", "Beetle Supafaust",     ["snes"],  "mednafen_supafaust_libretro.dll"),
+    _core("mesen_s_core",          "Mesen-S",              ["snes", "gb", "gbc"], "mesen-s_libretro.dll"),
+    # === Nintendo 64 ===
+    _core("mupen64plus_next_core", "Mupen64Plus-Next",     ["n64"],   "mupen64plus_next_libretro.dll"),
+    _core("parallel_n64_core",     "ParaLLEl N64",         ["n64"],   "parallel_n64_libretro.dll"),
+    # === Game Boy / Game Boy Color ===
+    _core("gambatte_core",   "Gambatte",         ["gb", "gbc"],       "gambatte_libretro.dll"),
+    _core("sameboy_core",    "SameBoy",          ["gb", "gbc"],       "sameboy_libretro.dll"),
+    _core("gearboy_core",    "Gearboy",          ["gb", "gbc"],       "gearboy_libretro.dll"),
+    _core("tgbdual_core",    "TGB Dual",         ["gb", "gbc"],       "tgbdual_libretro.dll"),
+    # === Game Boy Advance ===
+    _core("mgba_core",       "mGBA",             ["gb", "gbc", "gba"], "mgba_libretro.dll"),
+    _core("vbam_core",       "VBA-M",            ["gba"],              "vbam_libretro.dll"),
+    _core("vba_next_core",   "VBA Next",         ["gba"],              "vba_next_libretro.dll"),
+    _core("gpsp_core",       "gpSP",             ["gba"],              "gpsp_libretro.dll"),
+    _core("meteor_core",     "Meteor",           ["gba"],              "meteor_libretro.dll"),
+    _core("beetle_gba_core", "Beetle GBA",       ["gba"],              "mednafen_gba_libretro.dll"),
+    # === Virtual Boy ===
+    _core("beetle_vb_core",  "Beetle VB",        ["vb"],               "mednafen_vb_libretro.dll"),
+    # === Nintendo DS ===
+    _core("melonds_ds_core", "melonDS DS",       ["nds"],              "melonds_ds_libretro.dll"),
+    _core("melonds_core",    "melonDS",          ["nds"],              "melonds_libretro.dll"),
+    _core("desmume_core",    "DeSmuME",          ["nds"],              "desmume_libretro.dll"),
+    _core("desmume2015_core","DeSmuME 2015",     ["nds"],              "desmume2015_libretro.dll"),
+    # === Nintendo 3DS ===
+    _core("citra_core",      "Citra",            ["3ds"],              "citra_libretro.dll"),
+    _core("citra_canary_core","Citra Canary",    ["3ds"],              "citra_canary_libretro.dll"),
+    # === GameCube / Wii ===
+    _core("dolphin_core",    "Dolphin",          ["gc", "wii"],        "dolphin_libretro.dll"),
+    # === Pokémon Mini ===
+    _core("pokemini_core",   "PokéMini",         ["pokemini"],         "pokemini_libretro.dll"),
+    # === Sega Genesis / Mega Drive / SMS / Game Gear / SG-1000 / CD / 32X ===
+    _core("genesis_plus_gx_core", "Genesis Plus GX", ["genesis", "sms", "gg", "segacd", "sg1000"], "genesis_plus_gx_libretro.dll"),
+    _core("picodrive_core",       "PicoDrive",       ["genesis", "sms", "gg", "segacd", "sega32x", "sg1000"], "picodrive_libretro.dll"),
+    _core("blastem_core",         "BlastEm",         ["genesis"],       "blastem_libretro.dll"),
+    _core("gearsystem_core",     "Gearsystem",      ["sms", "gg", "sg1000"], "gearsystem_libretro.dll"),
+    _core("smsplus_core",        "SMS Plus GX",     ["sms", "gg"],     "smsplus_libretro.dll"),
+    # === Sega Saturn ===
+    _core("beetle_saturn_core",   "Beetle Saturn",   ["saturn"],        "mednafen_saturn_libretro.dll"),
+    _core("kronos_core",         "Kronos",          ["saturn"],        "kronos_libretro.dll"),
+    _core("yabasanshiro_core",   "YabaSanshiro",    ["saturn"],        "yabasanshiro_libretro.dll"),
+    _core("yabause_core",        "Yabause",         ["saturn"],        "yabause_libretro.dll"),
+    # === Sega Dreamcast / NAOMI ===
+    _core("flycast_core",        "Flycast",         ["dreamcast"],     "flycast_libretro.dll"),
+    # === PlayStation ===
+    _core("beetle_psx_hw_core",  "Beetle PSX HW",   ["ps1"],           "mednafen_psx_hw_libretro.dll"),
+    _core("beetle_psx_core",     "Beetle PSX",       ["ps1"],           "mednafen_psx_libretro.dll"),
+    _core("swanstation_core",    "SwanStation",      ["ps1"],           "swanstation_libretro.dll"),
+    _core("pcsx_rearmed_core",   "PCSX ReARMed",    ["ps1"],           "pcsx_rearmed_libretro.dll"),
+    _core("duckstation_core",    "DuckStation",      ["ps1"],           "duckstation_libretro.dll"),
+    # === PlayStation 2 ===
+    _core("lrps2_core",          "LRPS2",           ["ps2"],           "lrps2_libretro.dll"),
+    # === PlayStation Portable ===
+    _core("ppsspp_core",         "PPSSPP",           ["psp"],           "ppsspp_libretro.dll"),
+    # === Atari 2600 ===
+    _core("stella_core",         "Stella",           ["atari2600"],     "stella_libretro.dll"),
+    _core("stella2014_core",     "Stella 2014",      ["atari2600"],     "stella2014_libretro.dll"),
+    # === Atari 5200 / 8-bit ===
+    _core("atari800_core",       "Atari800",         ["atari5200"],     "atari800_libretro.dll"),
+    _core("a5200_core",          "a5200",            ["atari5200"],     "a5200_libretro.dll"),
+    # === Atari 7800 ===
+    _core("prosystem_core",      "ProSystem",        ["atari7800"],     "prosystem_libretro.dll"),
+    # === Atari Lynx ===
+    _core("handy_core",          "Handy",            ["lynx"],          "handy_libretro.dll"),
+    _core("beetle_lynx_core",    "Beetle Lynx",      ["lynx"],          "mednafen_lynx_libretro.dll"),
+    # === Atari Jaguar ===
+    _core("virtual_jaguar_core", "Virtual Jaguar",   ["jaguar"],        "virtualjaguar_libretro.dll"),
+    # === Atari ST / STE / Falcon ===
+    _core("hatari_core",         "Hatari",           ["atarist"],       "hatari_libretro.dll"),
+    # === TurboGrafx-16 / PC Engine ===
+    _core("beetle_pce_fast_core","Beetle PCE Fast",  ["tg16"],          "mednafen_pce_fast_libretro.dll"),
+    _core("beetle_pce_core",     "Beetle PCE",       ["tg16"],          "mednafen_pce_libretro.dll"),
+    _core("beetle_sgx_core",     "Beetle SuperGrafx",["tg16"],          "mednafen_supergrafx_libretro.dll"),
+    # === NEC PC-FX ===
+    _core("beetle_pcfx_core",    "Beetle PC-FX",     ["pcfx"],          "mednafen_pcfx_libretro.dll"),
+    # === NEC PC-98 ===
+    _core("np2kai_core",         "Neko Project II Kai", ["pc98"],       "np2kai_libretro.dll"),
+    # === Neo Geo Pocket / Color ===
+    _core("beetle_neopop_core",  "Beetle NeoPop",    ["ngp"],           "mednafen_ngp_libretro.dll"),
+    _core("race_core",           "RACE",             ["ngp"],           "race_libretro.dll"),
+    # === Neo Geo (Arcade) ===
+    _core("fbneo_core",          "FinalBurn Neo",    ["neogeo", "mame"],"fbneo_libretro.dll"),
+    _core("geolith_core",        "Geolith",          ["neogeo"],        "geolith_libretro.dll"),
+    # === Neo Geo CD ===
+    _core("neocd_core",          "NeoCD",            ["neocd"],         "neocd_libretro.dll"),
+    # === Arcade / MAME ===
+    _core("mame_core",           "MAME (Current)",   ["mame"],          "mame_libretro.dll"),
+    _core("mame2003_plus_core",  "MAME 2003-Plus",   ["mame"],          "mame2003_plus_libretro.dll"),
+    _core("mame2003_core",       "MAME 2003",        ["mame"],          "mame2003_libretro.dll"),
+    _core("mame2010_core",       "MAME 2010",        ["mame"],          "mame2010_libretro.dll"),
+    # === 3DO ===
+    _core("opera_core",          "Opera",            ["3do"],           "opera_libretro.dll"),
+    # === Vectrex ===
+    _core("vecx_core",           "vecx",             ["vectrex"],       "vecx_libretro.dll"),
+    # === WonderSwan / WonderSwan Color ===
+    _core("beetle_wswan_core",   "Beetle Cygne",     ["wonderswan"],    "mednafen_wswan_libretro.dll"),
+    # === MSX / MSX2 ===
+    _core("fmsx_core",           "fMSX",             ["msx"],           "fmsx_libretro.dll"),
+    _core("bluemsx_core",        "blueMSX",          ["msx", "coleco", "sg1000"], "bluemsx_libretro.dll"),
+    # === ColecoVision ===
+    _core("gearcoleco_core",     "Gearcoleco",       ["coleco"],        "gearcoleco_libretro.dll"),
+    # === Intellivision ===
+    _core("freeintv_core",       "FreeIntv",         ["intv"],          "freeintv_libretro.dll"),
+    # === Magnavox Odyssey² / Videopac ===
+    _core("o2em_core",           "O2EM",             ["odyssey2"],      "o2em_libretro.dll"),
+    # === Fairchild Channel F ===
+    _core("freechaf_core",       "FreeChaF",         ["channelf"],      "freechaf_libretro.dll"),
+    # === Commodore 64 ===
+    _core("vice_x64_core",       "VICE x64",         ["c64"],           "vice_x64_libretro.dll"),
+    _core("vice_x64sc_core",     "VICE x64sc",       ["c64"],           "vice_x64sc_libretro.dll"),
+    # === Commodore Amiga ===
+    _core("puae_core",           "PUAE",             ["amiga"],         "puae_libretro.dll"),
+    _core("puae2021_core",       "PUAE 2021",        ["amiga"],         "puae2021_libretro.dll"),
+    # === Amstrad CPC ===
+    _core("cap32_core",          "Caprice32",        ["cpc"],           "cap32_libretro.dll"),
+    _core("crocods_core",        "CrocoDS",          ["cpc"],           "crocods_libretro.dll"),
+    # === ZX Spectrum ===
+    _core("fuse_core",           "Fuse",             ["zxspec"],        "fuse_libretro.dll"),
+    # === DOS ===
+    _core("dosbox_pure_core",    "DOSBox Pure",      ["dos", "pc"],     "dosbox_pure_libretro.dll"),
+    _core("dosbox_svn_core",     "DOSBox-SVN",       ["dos", "pc"],     "dosbox_svn_libretro.dll"),
+
+    # =================================================================
+    # Standalone emulators (only for systems without good cores)
+    # =================================================================
     EmulatorCatalogEntry(
         id="ryubing",
         name="Ryubing",
@@ -314,88 +331,7 @@ EMULATOR_CATALOG: list[EmulatorCatalogEntry] = [
         asset_include=["windows", "msvc", ".zip"],
         asset_exclude=["mingw", "arm64", "aarch64", "pgo"],
     ),
-    EmulatorCatalogEntry(
-        id="sameboy",
-        name="SameBoy",
-        homepage_url="https://github.com/LIJI32/SameBoy",
-        systems=["gb", "gbc"],
-        release_source="LIJI32/SameBoy",
-        install_strategy="archive",
-        install_subdir="sameboy",
-        exe_candidates=["sameboy.exe", "SameBoy.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="mgba",
-        name="mGBA",
-        homepage_url="https://github.com/mgba-emu/mgba",
-        systems=["gb", "gbc", "gba"],
-        release_source="mgba-emu/mgba",
-        install_strategy="archive",
-        install_subdir="mgba",
-        exe_candidates=["mGBA.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="desmume",
-        name="DeSmuME",
-        homepage_url="https://github.com/TASEmulators/desmume",
-        systems=["nds"],
-        release_source="TASEmulators/desmume",
-        install_strategy="archive",
-        install_subdir="desmume",
-        exe_candidates=["desmume.exe", "DeSmuME.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="melonds",
-        name="melonDS",
-        homepage_url="https://github.com/melonDS-emu/melonDS",
-        systems=["nds"],
-        release_source="melonDS-emu/melonDS",
-        install_strategy="archive",
-        install_subdir="melonds",
-        exe_candidates=["melonDS.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="citra",
-        name="Citra",
-        homepage_url="https://archive.org/details/citra-emu_202403",
-        systems=["3ds"],
-        release_provider="direct",
-        release_source="https://archive.org/download/citra-emu_202403/citra-windows-msvc-20240303-0ff3440_nightly.zip",
-        install_strategy="archive",
-        install_subdir="citra",
-        exe_candidates=["citra-qt.exe", "citra.exe"],
-        asset_include=["citra", "windows", ".zip"],
-        asset_exclude=["source", "symbols", "debug"],
-        preferred_version="20240303-0ff3440_nightly",
-        preferred_download_url="https://archive.org/download/citra-emu_202403/citra-windows-msvc-20240303-0ff3440_nightly.zip",
-    ),
-    EmulatorCatalogEntry(
-        id="flycast",
-        name="Flycast",
-        homepage_url="https://github.com/flyinghead/flycast",
-        systems=["dreamcast"],
-        release_source="flyinghead/flycast",
-        install_strategy="archive",
-        install_subdir="flycast",
-        exe_candidates=["flycast.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="duckstation",
-        name="DuckStation",
-        homepage_url="https://github.com/stenzek/duckstation",
-        systems=["ps1"],
-        release_source="stenzek/duckstation",
-        install_strategy="archive",
-        install_subdir="duckstation",
-        exe_candidates=["duckstation-qt-x64-ReleaseLTCG.exe", "duckstation-qt.exe"],
-        asset_include=["windows", "x64", ".zip", ".7z"],
-        asset_exclude=["pdb", "symbols", "debug", "arm64", "aarch64"],
-    ),
+    # === Sony PS2 (standalone) ===
     EmulatorCatalogEntry(
         id="pcsx2",
         name="PCSX2",
@@ -408,44 +344,104 @@ EMULATOR_CATALOG: list[EmulatorCatalogEntry] = [
         asset_include=["windows", ".7z"],
         asset_exclude=["symbols", "pdb"],
     ),
+    # === Sony PS1 (standalone) ===
+    EmulatorCatalogEntry(
+        id="duckstation",
+        name="DuckStation",
+        homepage_url="https://github.com/stenzek/duckstation",
+        systems=["ps1"],
+        release_provider="direct",
+        release_source="https://github.com/stenzek/duckstation/releases/download/latest/duckstation-windows-x64-release.zip",
+        install_strategy="archive",
+        install_subdir="duckstation",
+        exe_candidates=[
+            "duckstation-qt-x64-ReleaseLTCG.exe",
+            "duckstation-qt.exe",
+            "duckstation-nogui-x64-ReleaseLTCG.exe",
+        ],
+        asset_include=["windows", "x64", ".zip"],
+        asset_exclude=["arm64", "symbols", "debug"],
+        preferred_version="latest",
+        preferred_download_url="https://github.com/stenzek/duckstation/releases/download/latest/duckstation-windows-x64-release.zip",
+    ),
+    # === Sony PS3 (standalone) ===
     EmulatorCatalogEntry(
         id="rpcs3",
         name="RPCS3",
         homepage_url="https://github.com/RPCS3/rpcs3",
         systems=["ps3"],
-        release_source="RPCS3/rpcs3",
+        release_source="RPCS3/rpcs3-binaries-win",
         install_strategy="archive",
         install_subdir="rpcs3",
         exe_candidates=["rpcs3.exe"],
-        asset_include=["windows", ".7z", ".zip"],
+        asset_include=["win64", ".7z"],
         asset_exclude=["symbols", "pdb", "debug"],
     ),
+    # === Nintendo Wii U (standalone) ===
     EmulatorCatalogEntry(
-        id="ppsspp",
-        name="PPSSPP",
-        homepage_url="https://www.ppsspp.org/",
-        systems=["psp"],
+        id="cemu",
+        name="Cemu",
+        homepage_url="https://github.com/cemu-project/Cemu",
+        systems=["wiiu"],
+        release_source="cemu-project/Cemu",
+        install_strategy="archive",
+        install_subdir="cemu",
+        exe_candidates=["Cemu.exe"],
+        asset_include=["windows", "x64", ".zip"],
+    ),
+    # === Nintendo 3DS (standalone) ===
+    EmulatorCatalogEntry(
+        id="azahar",
+        name="Azahar",
+        homepage_url="https://github.com/azahar-emu/azahar",
+        systems=["3ds"],
+        release_source="azahar-emu/azahar",
+        install_strategy="archive",
+        install_subdir="azahar",
+        exe_candidates=["azahar-qt.exe", "azahar.exe"],
+        default_args='"{rom}"',
+        asset_include=["windows", "msvc", ".zip"],
+        asset_exclude=["installer", "msys2", "source", "android", "macos", "docker"],
+    ),
+    EmulatorCatalogEntry(
+        id="citra_standalone",
+        name="Citra (Standalone)",
+        homepage_url="https://archive.org/details/citra-emu_202403",
+        systems=["3ds"],
         release_provider="direct",
-        release_source="https://www.ppsspp.org/files/1_19_3/ppsspp_win.zip",
+        release_source="https://archive.org/download/citra-emu_202403/citra-windows-msvc-20240303-0ff3440_nightly.zip",
         install_strategy="archive",
-        install_subdir="ppsspp",
-        exe_candidates=["PPSSPPWindows64.exe", "PPSSPPWindows.exe", "PPSSPPQt.exe"],
-        asset_include=["ppsspp", "win", ".zip"],
-        asset_exclude=["android", "ios", "source", "symbols", "debug"],
-        preferred_version="1.19.3",
-        preferred_download_url="https://www.ppsspp.org/files/1_19_3/ppsspp_win.zip",
+        install_subdir="citra",
+        exe_candidates=["citra-qt.exe", "citra.exe"],
+        asset_include=["citra", "windows", ".zip"],
+        preferred_version="20240303-nightly",
+        preferred_download_url="https://archive.org/download/citra-emu_202403/citra-windows-msvc-20240303-0ff3440_nightly.zip",
+        notes="Discontinued. Consider using Azahar instead.",
+    ),
+    # === Nintendo DS (standalone) ===
+    EmulatorCatalogEntry(
+        id="melonds_standalone",
+        name="melonDS (Standalone)",
+        homepage_url="https://github.com/melonDS-emu/melonDS",
+        systems=["nds"],
+        release_source="melonDS-emu/melonDS",
+        install_strategy="archive",
+        install_subdir="melonds",
+        exe_candidates=["melonDS.exe"],
+        asset_include=["win", ".zip"],
     ),
     EmulatorCatalogEntry(
-        id="vita3k",
-        name="Vita3K",
-        homepage_url="https://github.com/Vita3K/Vita3K",
-        systems=["psvita"],
-        release_source="Vita3K/Vita3K",
+        id="desmume_standalone",
+        name="DeSmuME (Standalone)",
+        homepage_url="https://github.com/TASEmulators/desmume",
+        systems=["nds"],
+        release_source="TASEmulators/desmume",
         install_strategy="archive",
-        install_subdir="vita3k",
-        exe_candidates=["Vita3K.exe"],
-        asset_include=["windows", ".zip"],
+        install_subdir="desmume",
+        exe_candidates=["desmume.exe", "DeSmuME.exe"],
+        asset_include=["win", ".zip"],
     ),
+    # === Xbox (standalone) ===
     EmulatorCatalogEntry(
         id="xemu",
         name="Xemu",
@@ -458,6 +454,7 @@ EMULATOR_CATALOG: list[EmulatorCatalogEntry] = [
         asset_include=["windows", "x86_64", ".zip"],
         asset_exclude=["arm64", "pdb", "dbg", "debug", "macos", "appimage"],
     ),
+    # === Xbox 360 (standalone) ===
     EmulatorCatalogEntry(
         id="xenia",
         name="Xenia",
@@ -469,131 +466,6 @@ EMULATOR_CATALOG: list[EmulatorCatalogEntry] = [
         exe_candidates=["xenia_canary.exe", "xenia.exe"],
         asset_include=["windows", ".zip"],
     ),
-    EmulatorCatalogEntry(
-        id="stella",
-        name="Stella",
-        homepage_url="https://github.com/stella-emu/stella",
-        systems=["atari2600"],
-        release_source="stella-emu/stella",
-        install_strategy="archive",
-        install_subdir="stella",
-        exe_candidates=["Stella.exe", "stella.exe"],
-        asset_include=["win", ".zip"],
-    ),
-    EmulatorCatalogEntry(
-        id="mame",
-        name="MAME",
-        homepage_url="https://github.com/mamedev/mame",
-        systems=["mame"],
-        release_source="mamedev/mame",
-        install_strategy="manual",
-        install_subdir="mame",
-        exe_candidates=["mame.exe", "mame64.exe"],
-        asset_include=["win", "64", ".zip"],
-        notes="Official binary packages are not reliably published through this GitHub repository.",
-    ),
-    EmulatorCatalogEntry(
-        id="dosbox_staging",
-        name="DOSBox Staging",
-        homepage_url="https://github.com/dosbox-staging/dosbox-staging",
-        systems=["dos", "pc"],
-        release_source="dosbox-staging/dosbox-staging",
-        install_strategy="archive",
-        install_subdir="dosbox-staging",
-        exe_candidates=["dosbox.exe"],
-        asset_include=["win", "x64", ".zip"],
-    ),
-    # RetroArch core packages requested explicitly
-    EmulatorCatalogEntry(
-        id="genesis_plus_gx_core",
-        name="Genesis Plus GX (Libretro Core)",
-        homepage_url="https://github.com/libretro/Genesis-Plus-GX",
-        systems=["genesis", "sms", "gg"],
-        release_source="libretro/Genesis-Plus-GX",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
-    EmulatorCatalogEntry(
-        id="picodrive_core",
-        name="PicoDrive (Libretro Core)",
-        homepage_url="https://github.com/libretro/picodrive",
-        systems=["genesis", "sms", "gg"],
-        release_source="libretro/picodrive",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
-    EmulatorCatalogEntry(
-        id="beetle_saturn_core",
-        name="Beetle Saturn (Libretro Core)",
-        homepage_url="https://github.com/libretro/beetle-saturn-libretro",
-        systems=["saturn"],
-        release_source="libretro/beetle-saturn-libretro",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
-    EmulatorCatalogEntry(
-        id="prosystem_core",
-        name="ProSystem (Libretro Core)",
-        homepage_url="https://github.com/libretro/prosystem-libretro",
-        systems=["atari7800"],
-        release_source="libretro/prosystem-libretro",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
-    EmulatorCatalogEntry(
-        id="handy_core",
-        name="Handy (Libretro Core)",
-        homepage_url="https://github.com/libretro/handy-libretro",
-        systems=["lynx"],
-        release_source="libretro/handy-libretro",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
-    EmulatorCatalogEntry(
-        id="virtual_jaguar_core",
-        name="Virtual Jaguar (Libretro Core)",
-        homepage_url="https://github.com/libretro/virtualjaguar-libretro",
-        systems=["jaguar"],
-        release_source="libretro/virtualjaguar-libretro",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
-    EmulatorCatalogEntry(
-        id="beetle_pce_core",
-        name="Beetle PCE (Mednafen Core)",
-        homepage_url="https://github.com/libretro/beetle-pce-libretro",
-        systems=["tg16"],
-        release_source="libretro/beetle-pce-libretro",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
-    EmulatorCatalogEntry(
-        id="beetle_pce_fast_core",
-        name="Beetle PCE Fast",
-        homepage_url="https://github.com/libretro/beetle-pce-fast-libretro",
-        systems=["tg16"],
-        release_source="libretro/beetle-pce-fast-libretro",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
-    EmulatorCatalogEntry(
-        id="beetle_neopop_core",
-        name="Beetle NeoPop",
-        homepage_url="https://github.com/libretro/beetle-ngp-libretro",
-        systems=["ngp"],
-        release_source="libretro/beetle-ngp-libretro",
-        install_strategy="retroarch_core",
-        install_subdir="retroarch-cores",
-        windows_supported=True,
-    ),
 ]
 
 EMULATOR_CATALOG_BY_ID: dict[str, EmulatorCatalogEntry] = {e.id: e for e in EMULATOR_CATALOG}
@@ -601,10 +473,13 @@ EMULATOR_CATALOG_BY_NAME: dict[str, EmulatorCatalogEntry] = {e.name: e for e in 
 
 
 def emulators_for_system(system_id: str) -> list[tuple[str, str]]:
-    """Return [(name, url)] of emulators that support the given system."""
+    """Return [(name, url)] of emulators that support the given system.
+
+    Includes both standalone emulators and RetroArch cores.
+    """
     result = []
     for entry in EMULATOR_CATALOG:
-        if entry.install_strategy == "retroarch_core":
+        if entry.id == "retroarch":
             continue
         if system_id in entry.systems:
             result.append((entry.name, entry.homepage_url))
@@ -620,9 +495,11 @@ def systems_without_installable_emulator() -> list[str]:
     """Return system IDs that currently have no Windows-installable catalog entry."""
     coverage: dict[str, bool] = {sid: False for sid, _, _ in KNOWN_SYSTEMS}
     for item in EMULATOR_CATALOG:
-        if item.install_strategy == "retroarch_core":
+        if item.id == "retroarch":
             continue
         if not item.windows_supported:
+            continue
+        if item.install_strategy == "manual":
             continue
         for system_id in item.systems:
             if system_id in coverage:
@@ -680,77 +557,15 @@ SCRAPER_ARTWORK_LABELS: dict[str, str] = {
 
 SCRAPER_SOURCES: list[ScraperSourceInfo] = [
     ScraperSourceInfo(
-        id="screenscraper",
-        name="ScreenScraper",
-        url="https://screenscraper.fr",
+        id="steamgriddb",
+        name="SteamGridDB",
+        url="https://www.steamgriddb.com",
         auth_fields=[
-            ("username", "Username:", "ScreenScraper username", False),
-            ("password", "Password:", "ScreenScraper password", True),
+            ("api_key", "API Key:", "SteamGridDB API key", True),
         ],
-        content=["title", "description", "genre", "release_date",
-                 "developer", "publisher", "players", "rating",
-                 "region", "language"],
-        artwork=["front_box", "back_box", "3d_box", "screenshots",
-                 "title_screen", "fan_art", "marquee", "video_snaps",
-                 "manual"],
-        supports_hash=True,
-        supports_region_priority=True,
-    ),
-    ScraperSourceInfo(
-        id="thegamesdb",
-        name="TheGamesDB",
-        url="https://thegamesdb.net",
-        auth_fields=[
-            ("api_key", "API Key:", "TheGamesDB developer API key", True),
-        ],
-        content=["title", "description", "genre", "release_date",
-                 "developer", "publisher", "players", "rating"],
-        artwork=["front_box", "back_box", "screenshots",
-                 "fan_art", "banner", "clear_logo"],
-    ),
-    ScraperSourceInfo(
-        id="igdb",
-        name="IGDB",
-        url="https://igdb.com",
-        auth_fields=[
-            ("client_id", "Twitch Client ID:", "Twitch application Client ID", False),
-            ("client_secret", "Client Secret:", "Twitch application Client Secret", True),
-        ],
-        content=["title", "description", "storyline", "genre", "release_date",
-                 "developer", "publisher", "players", "rating", "themes"],
-        artwork=["front_box", "screenshots", "fan_art", "video_snaps"],
-    ),
-    ScraperSourceInfo(
-        id="launchbox",
-        name="LaunchBox DB",
-        url="https://gamesdb.launchbox-app.com",
-        auth_fields=[],
-        content=["title", "description", "genre", "release_date",
-                 "developer", "publisher", "players", "rating"],
-        artwork=["front_box", "back_box", "3d_box", "screenshots",
-                 "fan_art", "banner", "disc_art", "clear_logo"],
-    ),
-    ScraperSourceInfo(
-        id="mobygames",
-        name="MobyGames",
-        url="https://mobygames.com",
-        auth_fields=[
-            ("api_key", "API Key:", "MobyGames API key", True),
-        ],
-        content=["title", "description", "genre", "release_date",
-                 "developer", "publisher", "rating"],
-        artwork=["front_box", "back_box", "screenshots", "promo_art"],
-        rate_limit_note="Free tier limited to 720 requests/hour (1 per 5 seconds).",
-    ),
-    ScraperSourceInfo(
-        id="openretro",
-        name="OpenRetro",
-        url="https://openretro.org",
-        auth_fields=[],
-        content=["title", "description", "genre", "release_date",
-                 "developer", "publisher"],
-        artwork=["front_box", "screenshots"],
-        rate_limit_note="Limited database coverage. Best suited for Amiga and classic computer games.",
+        content=["title"],
+        artwork=["front_box", "banner", "clear_logo", "fan_art", "screenshots"],
+        rate_limit_note="SteamGridDB is the active metadata/artwork source in Meridian.",
     ),
 ]
 
@@ -772,6 +587,14 @@ class EmulatorEntry:
     install_dir: str = ""
     provider: str = ""
     system_overrides: dict[str, str] = field(default_factory=dict)
+
+    # Per-emulator settings
+    fullscreen_on_launch: bool = False
+    exclusive_fullscreen: bool = False
+    resolution_override: str = "Default"   # Default / 720p / 1080p / 1440p / 4K
+    close_meridian_on_launch: bool = False
+    auto_save_state: bool = False
+    controller_profile: str = "Global"     # name of the controller profile to use
 
     def display_name(self) -> str:
         return self.name or "(unnamed)"
@@ -806,6 +629,13 @@ class Config:
     bold_text: bool = False
     reduced_motion: bool = False
     high_contrast: bool = False
+    system_logo_set: str = "Colorful"  # Colorful / White / Black
+
+    # Game Display
+    show_game_icons: bool = True
+    show_system_logos: bool = True
+    show_file_extensions: bool = False
+    sort_default: str = "Title"          # Title / Platform / Added / Played
 
     # Background
     bg_type: str = "None"              # None / Image / Animation
@@ -815,18 +645,31 @@ class Config:
     # Graphics — Display
     remember_window_geometry: bool = False
     borderless_fullscreen: bool = False
+    ui_animation_speed: str = "Normal"   # Slow / Normal / Fast / Instant
+    smooth_scrolling: bool = True
+    list_transition_style: str = "Fade"  # Fade / Slide / None
 
     # Graphics — Rendering  (vsync + gpu_accel are applied at startup)
     vsync: bool = True
     gpu_accelerated_ui: bool = False
+    text_rendering: str = "Subpixel"     # Subpixel / Greyscale / None
+    image_scaling: str = "Bilinear"      # Nearest / Bilinear / Smooth
+    icon_size: int = 48                  # 32 / 48 / 64 / 96
 
     # Performance — CPU
     limit_background_cpu: bool = False
     scan_threads: int = 4              # 1-16
     background_fps: int = 30           # animation fps when window unfocused
+    foreground_fps: int = 60           # animation fps when window focused
+    lazy_load_artwork: bool = True
+    prefetch_adjacent: bool = True     # pre-load art for items near viewport
 
     # Performance — GPU
     gpu_backend: str = "Auto"          # Auto / OpenGL / Software
+
+    # Performance — Memory
+    max_loaded_images: int = 200       # evict beyond this count
+    preload_emulator_configs: bool = True
 
     # Performance — Cache
     cache_box_art: bool = True
@@ -835,7 +678,7 @@ class Config:
     thumbnail_resolution: str = "Medium"  # Low / Medium / High
 
     # Scraper
-    scraper_source: str = "ScreenScraper"
+    scraper_source: str = "SteamGridDB"
     scraper_credentials: dict = field(default_factory=dict)  # {source_name: {key: value}}
     scraper_content: dict = field(default_factory=lambda: {
         "title": True, "description": True, "genre": True,
@@ -850,8 +693,21 @@ class Config:
     scraper_auto_scrape: bool = False
     scraper_overwrite: bool = False
     scraper_prefer_local: bool = False
-    scraper_hash_matching: bool = True
     scraper_region_priority: str = "USA"
+
+    # RetroArch
+    retroarch_auto_update: bool = True   # update RetroArch + cores on startup
+
+    # Networking
+    multiplayer_enabled: bool = False
+    multiplayer_username: str = "Player"
+    multiplayer_port: int = 55435
+    multiplayer_directory_url: str = ""
+    multiplayer_show_full_rooms: bool = True
+    multiplayer_preferred_region: str = "Any"
+    multiplayer_auto_refresh_seconds: int = 30
+    updates_check_on_startup: bool = False
+    updates_include_prerelease: bool = False
 
     # Audio
     audio_output_device: str = "Default"
@@ -861,14 +717,34 @@ class Config:
     audio_mute: bool = False
     audio_mute_background: bool = True
     audio_mute_unfocused_emu: bool = False
+    ambient_audio_enabled: bool = False
+    ambient_audio_volume: int = 30      # 0-100
+
+    # File Management
+    file_verify_on_scan: bool = False          # check files exist on each scan
+    file_auto_remove_missing: bool = False     # drop missing files from library automatically
+
+    # Debug
+    debug_logging: bool = False
+    debug_show_fps: bool = False
+    debug_log_emulator_stdout: bool = False
+    debug_log_level: str = "WARNING"     # DEBUG / INFO / WARNING / ERROR
+    debug_show_widget_borders: bool = False
 
     # Input
-    # { "1": {"connected": bool, "device": str, "type": str}, ... }
+    input_gamepad_nav: bool = False
+    input_vibration: bool = True
+    input_motion: bool = True
+    input_focus_only: bool = True
+    # { "1": {"connected": bool, "api": str, "device": str, "type": str}, ... }
     input_player_settings: dict = field(default_factory=dict)
-    # Named controller profiles:
-    # { "Profile Name": { "1": {"connected": bool, "device": str, "type": str}, ... }, ... }
+
+    steam_input_warning_shown: bool = False # one-shot advisory re Steam Input
+
+    # Named controller profiles (profile_name -> player_settings dict)
+    # "Global" is a virtual name that references input_player_settings above.
+    # { "RetroArch": { "1": { "connected": true, ... }, "2": ... }, ... }
     controller_profiles: dict = field(default_factory=dict)
-    active_controller_profile: str = ""
 
     # BIOS file paths
     # { "<bios_id>": "C:/path/to/bios.bin", ... }
@@ -958,6 +834,98 @@ class Config:
     def emulator_names(self) -> list[str]:
         """Return a list of all configured emulator display names."""
         return [e.display_name() for e in self.emulators]
+
+
+# -- BIOS filename aliases (shared between settings UI and launch logic) ----
+
+BIOS_FILENAME_ALIASES: dict[str, list[str]] = {
+    "nes_fds_bios": ["disksys.rom"],
+    "gba_bios": ["gba_bios.bin"],
+    "nds_bios7": ["bios7.bin"],
+    "nds_bios9": ["bios9.bin"],
+    "nds_firmware": ["firmware.bin"],
+    "dsi_bios7": ["dsi_bios7.bin"],
+    "dsi_bios9": ["dsi_bios9.bin"],
+    "dsi_firmware": ["dsi_firmware.bin"],
+    "dsi_nand": ["dsi_nand.bin"],
+    "n3ds_aes_keys": ["aes_keys.txt"],
+    "n3ds_seeddb": ["seeddb.bin"],
+    "n3ds_boot9": ["boot9.bin"],
+    "n3ds_boot11": ["boot11.bin"],
+    "gc_ipl": ["IPL.bin"],
+    "wii_keys": ["keys.bin"],
+    "wiiu_keys": ["keys.txt"],
+    "switch_prod_keys": ["prod.keys"],
+    "switch_title_keys": ["title.keys"],
+    "saturn_bios_jp": ["sega_101.bin"],
+    "saturn_bios_us_eu": ["mpr-17933.bin"],
+    "dc_boot": ["dc_boot.bin"],
+    "dc_flash": ["dc_flash.bin"],
+    "ps1_scp1001": ["scph1001.bin", "scph5501.bin"],
+    "ps1_scp5500": ["scph5500.bin"],
+    "ps1_scp5502": ["scph5502.bin"],
+    "ps1_scp700x": ["scph7001.bin", "scph7003.bin", "scph7502.bin"],
+    "ps2_main": ["scph10000.bin"],
+    "ps2_rom1": ["rom1.bin"],
+    "ps2_rom2": ["rom2.bin"],
+    "ps2_erom": ["erom.bin"],
+    "ps2_nvm": ["nvm.bin"],
+    "ps3_firmware": ["PS3UPDAT.PUP"],
+    "atari7800_bios": ["7800 BIOS (U).rom"],
+    "lynx_boot": ["lynxboot.img"],
+    "jaguar_bios": ["jagboot.rom"],
+    "jaguar_cd_bios": ["jagcd.bin"],
+    "tg16_syscard1": ["syscard1.pce"],
+    "tg16_syscard2": ["syscard2.pce"],
+    "tg16_syscard3": ["syscard3.pce"],
+    "neogeo_zip": ["neogeo.zip"],
+    "ngp_bios": ["ngp_bios.ngp", "ngpcbios.rom"],
+    "mame_qsound": ["qsound.zip"],
+    "mame_pgm": ["pgm.zip"],
+    "mame_cps3": ["cps3.zip"],
+    "mame_stvbios": ["stvbios.zip"],
+    "mame_hikaru": ["hikaru.zip"],
+    "mame_chihiro": ["chihiro.zip"],
+    "mame_model2": ["model2.zip"],
+    "mame_model3": ["model3.zip"],
+    "3do_panafz10": ["panafz10.bin"],
+    "3do_panafz1": ["panafz1.bin"],
+    "3do_goldstar": ["goldstar.bin"],
+    "vectrex_bios": ["bios.bin"],
+    "wswan_boot": ["wswanboot.bin"],
+    "msx_bios": ["MSX.ROM"],
+    "msx2_bios": ["MSX2.ROM"],
+    "msx2ext_bios": ["MSX2EXT.ROM"],
+    "msx_disk": ["DISK.ROM"],
+    "segacd_bios_us": ["bios_CD_U.bin"],
+    "segacd_bios_eu": ["bios_CD_E.bin"],
+    "segacd_bios_jp": ["bios_CD_J.bin"],
+    "sega32x_bios_m68k": ["32X_G_BIOS.BIN"],
+    "sega32x_bios_msh2": ["32X_M_BIOS.BIN"],
+    "sega32x_bios_ssh2": ["32X_S_BIOS.BIN"],
+    "pcfx_bios": ["pcfx.rom"],
+    "pc98_bios_font": ["font.bmp", "font.rom"],
+    "neocd_bios": ["neocd.bin", "neocdz.zip"],
+    "atari5200_bios": ["5200.rom"],
+    "atarist_tos": ["tos.img"],
+    "coleco_bios": ["coleco.rom"],
+    "intv_exec_bios": ["exec.bin"],
+    "intv_grom_bios": ["grom.bin"],
+    "odyssey2_bios": ["o2rom.bin"],
+    "channelf_bios_sl1": ["sl31253.bin"],
+    "channelf_bios_sl2": ["sl31254.bin"],
+    "n64_pif": ["pifdata.bin"],
+    "xbox_bios": ["Complex_4627.bin", "evox.bin"],
+    "xbox_eeprom": ["eeprom.bin"],
+    "psp_font": ["flash0"],
+    "psp_flash0": ["flash0"],
+    "sega_cd_us": ["bios_CD_U.bin"],
+    "sega_cd_eu": ["bios_CD_E.bin"],
+    "sega_cd_jp": ["bios_CD_J.bin"],
+    "sega32x_m68k": ["32X_G_BIOS.BIN"],
+    "sega32x_master": ["32X_M_BIOS.BIN"],
+    "sega32x_slave": ["32X_S_BIOS.BIN"],
+}
 
 
 def _safe_dataclass_from_dict(dataclass_type: type, value: dict[str, Any]):

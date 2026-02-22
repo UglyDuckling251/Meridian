@@ -1,3 +1,7 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 """
 Background widget for Meridian's main window.
 
@@ -26,7 +30,7 @@ from PySide6.QtQuickWidgets import QQuickWidget
 from meridian.ui.style import active_theme
 
 _QML_PATH = Path(__file__).resolve().parent.parent.parent / "assets" / "qml" / "Background.qml"
-_ALLOWED_ANIMATIONS = {"waves", "starscape"}
+_ALLOWED_ANIMATIONS = {"waves", "starscape", "1998"}
 
 
 class BackgroundWidget(QQuickWidget):

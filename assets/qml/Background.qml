@@ -73,6 +73,19 @@ Item {
     }
 
     // ================================================================
+    //  Animation: 1998  (Windows 98 flag GLSL shader)
+    // ================================================================
+    ShaderEffect {
+        visible:      root.mode === "Animation" && root.animType === "1998"
+        anchors.fill: parent
+
+        property real  iTime:   root.elapsed
+        property color bgColor: root.bgBase
+
+        fragmentShader: "flag1998.frag.qsb"
+    }
+
+    // ================================================================
     //  Animation: Starscape  (scene-graph dots — GPU composited)
     // ================================================================
     Item {

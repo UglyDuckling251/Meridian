@@ -1,3 +1,7 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 """
 Controller detection and input capture for Meridian.
 
@@ -31,6 +35,25 @@ class ControllerInfo:
     num_hats: int
     has_gyro: bool = False
     has_accel: bool = False
+    api_type: str = "SDL"
+
+
+def _detect_api_type(guid: str, name: str) -> str:
+    """Best-effort controller API classification for UI filtering."""
+    if sys.platform != "win32":
+        return "SDL"
+
+    g = (guid or "").strip().lower().replace("-", "")
+    n = (name or "").strip().lower()
+
+    # SDL and gamecontrollerdb encode XInput pseudo-GUIDs as ASCII "xinput".
+    if g.startswith("78696e707574") or "xinput" in n or "xbox" in n:
+        return "XInput"
+    if "directinput" in n or "dinput" in n:
+        return "DirectInput"
+    # Windows fallback: if not identified as XInput, most legacy pads route
+    # through DirectInput from the app perspective.
+    return "DirectInput"
 
 
 class InputManager:
@@ -113,6 +136,38 @@ class InputManager:
             pass
         self._ready = False
 
+    # -- Pause / resume (for emulator launches) ----------------------------
+
+    def pause(self) -> None:
+        """Release controller handles so launched emulators receive input.
+
+        On Windows, SDL2 registers a hidden window for raw-input (HID)
+        messages.  While Meridian holds these handles the emulator's own
+        SDL2 instance may detect the device but never receive events.
+        Calling :meth:`pause` before :func:`subprocess.Popen` avoids
+        that conflict.
+
+        Use :meth:`resume` (or :meth:`ensure_ready`) to re-acquire.
+        """
+        self._close_game_controllers()
+        if not self._ready:
+            return
+        try:
+            import pygame
+            self._joysticks.clear()
+            self._controllers.clear()
+            pygame.joystick.quit()
+        except Exception:
+            pass
+        self._ready = False
+
+    def resume(self) -> bool:
+        """Re-initialise the joystick subsystem after a :meth:`pause`.
+
+        Returns ``True`` on success (same contract as :meth:`ensure_ready`).
+        """
+        return self.ensure_ready()
+
     # -- Controller enumeration --------------------------------------------
 
     def refresh(self) -> list[ControllerInfo]:
@@ -132,6 +187,12 @@ class InputManager:
         for i in range(pygame.joystick.get_count()):
             joy = pygame.joystick.Joystick(i)
             joy.init()
+            guid = ""
+            if hasattr(joy, "get_guid"):
+                try:
+                    guid = str(joy.get_guid())
+                except Exception:
+                    guid = ""
             self._joysticks[i] = joy
             self._controllers.append(ControllerInfo(
                 index=i,
@@ -139,6 +200,7 @@ class InputManager:
                 num_buttons=joy.get_numbuttons(),
                 num_axes=joy.get_numaxes(),
                 num_hats=joy.get_numhats(),
+                api_type=_detect_api_type(guid, joy.get_name()),
             ))
 
         # Open as GameControllers for sensor access
@@ -156,6 +218,31 @@ class InputManager:
             if c.name == name:
                 return c.index
         return None
+
+    def get_device_guid(self, index: int) -> str:
+        """Return the SDL GUID string for the device at *index*."""
+        joy = self._joysticks.get(index)
+        if joy is not None and hasattr(joy, "get_guid"):
+            try:
+                return str(joy.get_guid())
+            except Exception:
+                pass
+        return ""
+
+    def device_info_snapshot(self) -> list[dict]:
+        """Return a snapshot of connected devices for emulator config writing.
+
+        Each dict contains *index*, *name*, and *guid*.
+        Called before :meth:`pause` so the data is available during launch.
+        """
+        out: list[dict] = []
+        for c in self._controllers:
+            out.append({
+                "index": c.index,
+                "name": c.name,
+                "guid": self.get_device_guid(c.index),
+            })
+        return out
 
     # -- SDL2 GameController / sensor layer --------------------------------
 

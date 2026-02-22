@@ -1,9 +1,13 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 """
 Pre-launch auto-configuration for emulators.
 
 Before Meridian launches a game it calls :func:`auto_configure_emulator` which
-writes (or patches) the emulator's own config files so that BIOS paths, ROM
-directories, and controller input settings are picked up automatically.
+writes (or patches) the emulator's own config files so that BIOS paths and ROM
+directories are picked up automatically.
 
 Each supported emulator has its own ``_setup_<name>`` helper.  Unknown
 emulators are silently skipped — the existing copy-BIOS-files approach in
@@ -13,12 +17,10 @@ emulators are silently skipped — the existing copy-BIOS-files approach in
 from __future__ import annotations
 
 import configparser
-import json
 import logging
 import os
 import re
 import shutil
-import textwrap
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -26,11 +28,37 @@ from xml.etree import ElementTree as ET
 
 from meridian.core.config import (
     Config,
+    EmulatorCatalogEntry,
     EmulatorEntry,
     emulator_catalog_entry,
 )
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Player settings resolution
+# ---------------------------------------------------------------------------
+
+def resolve_player_settings(
+    config: Config,
+    emulator: EmulatorEntry | None = None,
+) -> dict[str, dict]:
+    """Return the effective per-player settings dict.
+
+    Keys are player numbers as strings (``"1"`` … ``"10"``).  Each value is a
+    dict with at least ``connected``, ``api``, ``device``, ``device_index``,
+    ``type``, and ``bindings``.
+
+    If *emulator* is provided and has a non-Global controller profile assigned,
+    that profile's settings are used instead of the global defaults.
+    """
+    profile = (emulator.controller_profile or "Global") if emulator else "Global"
+    if profile != "Global":
+        profiles = getattr(config, "controller_profiles", None) or {}
+        if profile in profiles:
+            return dict(profiles[profile])
+    return dict(config.input_player_settings or {})
 
 
 # ---------------------------------------------------------------------------
@@ -57,15 +85,18 @@ def auto_configure_emulator(
     exe_path:
         Resolved path to the emulator executable.
     config:
-        The current Meridian :class:`Config` (holds BIOS paths, input
-        settings, system entries, etc.).
+        The current Meridian :class:`Config` (holds BIOS paths, system
+        entries, etc.).
     """
     catalog = emulator_catalog_entry(emulator.catalog_id or emulator.name)
     emu_id = (catalog.id if catalog else emulator.display_name()).lower()
 
+    # All RetroArch cores use the same auto-configure handler
+    is_retroarch_core = catalog and catalog.install_strategy == "retroarch_core"
+
     rom_dir = _rom_directory_for_system(system_id, config)
     bios_map = _bios_paths_for_system(system_id, config)
-    input_cfg = _collect_input_config(config)
+    players = resolve_player_settings(config, emulator)
 
     ctx = _SetupContext(
         emulator=emulator,
@@ -76,65 +107,105 @@ def auto_configure_emulator(
         config=config,
         rom_dir=rom_dir,
         bios_map=bios_map,
-        input_cfg=input_cfg,
+        player_settings=players,
     )
 
-    # Write a diagnostic file so the user can verify what Meridian sees.
     _write_debug_log(ctx)
 
-    handler = _HANDLERS.get(emu_id)
-    if handler is None:
+    if is_retroarch_core:
+        handler = _setup_retroarch
+    else:
+        handler = _HANDLERS.get(emu_id)
+
+    if handler is not None:
+        log.debug("Auto-configuring '%s'%s", emu_id,
+                  " (RetroArch core)" if is_retroarch_core else "")
+        try:
+            handler(ctx)
+        except Exception:
+            log.exception("Failed to auto-configure emulator '%s'", emu_id)
+    else:
         log.debug("No auto-configure handler for emulator id '%s'", emu_id)
+
+    if not is_retroarch_core:
+        _run_extension_input(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Extension-based input profile dispatch
+# ---------------------------------------------------------------------------
+
+def _run_extension_input(ctx: _SetupContext) -> None:
+    """Try to load an extension for *ctx.emu_id* and call its input hook.
+
+    Each extension lives at ``emulators.extensions.<emu_id>`` and may expose
+    a ``configure_input(player_settings, exe_path, game_path)`` function.
+    If the module or function doesn't exist the call is silently skipped.
+    """
+    import importlib
+
+    module_name = f"emulators.extensions.{ctx.emu_id}"
+    try:
+        ext = importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        log.debug("No extension module for '%s'", ctx.emu_id)
+        return
+    except Exception:
+        log.debug("Failed to import extension '%s'", module_name, exc_info=True)
         return
 
-    log.debug(
-        "Auto-configuring '%s': gamepad=%s driver=%s bindings=%d",
-        emu_id, input_cfg.is_gamepad, input_cfg.driver,
-        len(input_cfg.bindings),
-    )
+    configure = getattr(ext, "configure_input", None)
+    if configure is None:
+        log.debug("Extension '%s' has no configure_input()", ctx.emu_id)
+        return
+
     try:
-        handler(ctx)
+        configure(
+            player_settings=ctx.player_settings,
+            exe_path=ctx.exe_path,
+            game_path=ctx.game_path,
+        )
+        log.debug("Extension '%s' configured input profiles", ctx.emu_id)
     except Exception:
-        log.exception("Failed to auto-configure emulator '%s'", emu_id)
+        log.debug(
+            "Extension '%s' configure_input() failed",
+            ctx.emu_id,
+            exc_info=True,
+        )
 
 
 def _write_debug_log(ctx: _SetupContext) -> None:
     """Write ``meridian_input_debug.txt`` next to the emulator exe.
 
     This lets the user (and us) verify exactly what Meridian sees when
-    it tries to configure the emulator — emu-id, handler match, gamepad
-    detection, bindings, and file paths.
+    it tries to configure the emulator.
     """
     try:
-        inp = ctx.input_cfg
         handler = _HANDLERS.get(ctx.emu_id)
         lines = [
-            f"Meridian auto-configure debug",
-            f"=============================",
+            "Meridian auto-configure debug",
+            "=============================",
             f"emu_id          : {ctx.emu_id}",
             f"handler found   : {handler is not None}",
             f"exe_path        : {ctx.exe_path}",
             f"install_dir     : {ctx.install_dir}",
             f"system_id       : {ctx.system_id}",
-            f"",
-            f"--- Input Config ---",
-            f"is_gamepad      : {inp.is_gamepad}",
-            f"connected       : {inp.connected}",
-            f"device          : {inp.device}",
-            f"controller_type : {inp.controller_type}",
-            f"driver          : {inp.driver}",
-            f"sdl_guid        : {inp.sdl_guid or '(not detected)'}",
-            f"sdl_device_index: {inp.sdl_device_index}",
-            f"bindings count  : {len(inp.bindings)}",
+            "",
+            "Player settings",
+            "---------------",
         ]
-        if inp.bindings:
-            lines.append(f"")
-            lines.append(f"--- Bindings ---")
-            for k, v in sorted(inp.bindings.items()):
-                lines.append(f"  {k:15s} = {v}")
-        else:
-            lines.append(f"")
-            lines.append(f"*** NO BINDINGS — using SDL defaults ***")
+        for pnum, pdata in sorted(ctx.player_settings.items(), key=lambda t: t[0]):
+            if not isinstance(pdata, dict):
+                continue
+            connected = pdata.get("connected", False)
+            api = pdata.get("api", "Auto")
+            device = pdata.get("device", "")
+            dev_idx = pdata.get("device_index")
+            ptype = pdata.get("type", "")
+            lines.append(
+                f"  P{pnum}: connected={connected}  api={api}  "
+                f"device={device!r}  index={dev_idx}  type={ptype}"
+            )
 
         debug_path = ctx.exe_path.parent / "meridian_input_debug.txt"
         debug_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -149,7 +220,7 @@ def _write_debug_log(ctx: _SetupContext) -> None:
 class _SetupContext:
     __slots__ = (
         "emulator", "emu_id", "game_path", "system_id", "exe_path",
-        "config", "rom_dir", "bios_map", "input_cfg",
+        "config", "rom_dir", "bios_map", "player_settings",
     )
 
     def __init__(self, **kw: Any):
@@ -161,121 +232,6 @@ class _SetupContext:
         if self.emulator.install_dir:
             return Path(self.emulator.install_dir)
         return self.exe_path.parent
-
-
-# ---------------------------------------------------------------------------
-# Input configuration dataclass
-# ---------------------------------------------------------------------------
-
-class _InputConfig:
-    """Normalized controller configuration derived from Meridian settings."""
-
-    def __init__(self, config: Config):
-        p1 = (config.input_player_settings or {}).get("1", {})
-        self.connected: bool = bool(p1.get("connected", True))
-        self.device: str = str(p1.get("device", "Any Available"))
-        self.controller_type: str = str(p1.get("type", "Pro Controller"))
-        self.bindings: dict[str, str] = dict(p1.get("bindings", {}))
-
-        # Determine the SDL/platform driver from the type/device
-        self.driver = self._detect_driver()
-        # Detect the SDL GUID of the physical controller (needed by
-        # Cemu, Citra, Eden, and other emulators that identify devices
-        # by GUID rather than simple index).
-        self.sdl_guid: str = self._detect_sdl_guid()
-        self.sdl_device_index: int = self._detect_device_index()
-
-    def _detect_driver(self) -> str:
-        name = (self.device + " " + self.controller_type).lower()
-        if "xinput" in name or "xbox" in name:
-            return "xinput"
-        if "dinput" in name:
-            return "dinput"
-        if "dualshock" in name or "dualsense" in name or "ds4" in name or "ds5" in name:
-            return "sdl2"
-        if "keyboard" in name:
-            return "keyboard"
-        # SDL2 is the best default for modern controllers
-        return "sdl2"
-
-    @property
-    def is_gamepad(self) -> bool:
-        return self.driver != "keyboard" and self.connected
-
-    # -- Device identification ---------------------------------------------
-
-    def _detect_sdl_guid(self) -> str:
-        """Return the SDL GUID hex string for the configured controller."""
-        try:
-            import pygame
-            if not pygame.joystick.get_init():
-                return ""
-            for i in range(pygame.joystick.get_count()):
-                joy = pygame.joystick.Joystick(i)
-                joy.init()
-                if (self.device == "Any Available"
-                        or joy.get_name() == self.device):
-                    return joy.get_guid()
-        except Exception:
-            pass
-        return ""
-
-    def _detect_device_index(self) -> int:
-        """Return the SDL joystick index for the configured controller."""
-        try:
-            import pygame
-            if not pygame.joystick.get_init():
-                return 0
-            for i in range(pygame.joystick.get_count()):
-                joy = pygame.joystick.Joystick(i)
-                joy.init()
-                if (self.device == "Any Available"
-                        or joy.get_name() == self.device):
-                    return i
-        except Exception:
-            pass
-        return 0
-
-    # -- Binding resolution ------------------------------------------------
-
-    @staticmethod
-    def _parse_binding(raw: str) -> tuple[str, int, str]:
-        """Parse ``"Button 0"`` → ``("button", 0, "")``, etc."""
-        raw = raw.strip()
-        if raw.startswith("Button "):
-            try:
-                return ("button", int(raw.split()[1]), "")
-            except (IndexError, ValueError):
-                pass
-        elif raw.startswith("Axis "):
-            try:
-                token = raw.split()[1]
-                return ("axis", int(token[:-1]), token[-1])
-            except (IndexError, ValueError):
-                pass
-        return ("none", 0, "")
-
-    def resolve_button(self, name: str) -> int:
-        """Return the raw SDL button index for *name* (user binding → default)."""
-        raw = self.bindings.get(name, "")
-        if raw:
-            kind, idx, _ = self._parse_binding(raw)
-            if kind == "button":
-                return idx
-        return _SDL_BUTTON_MAP.get(name, 0)
-
-    def resolve_axis(self, name: str) -> tuple[int, str]:
-        """Return ``(axis_index, direction)`` for *name* (user binding → default)."""
-        raw = self.bindings.get(name, "")
-        if raw:
-            kind, idx, direction = self._parse_binding(raw)
-            if kind == "axis":
-                return (idx, direction)
-        return _SDL_AXIS_MAP.get(name, (0, "+"))
-
-
-def _collect_input_config(config: Config) -> _InputConfig:
-    return _InputConfig(config)
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +307,19 @@ def _ensure_portable(directory: Path, marker: str = "portable.txt") -> None:
         p.write_text("", encoding="utf-8")
 
 
+_ROOT = Path(__file__).resolve().parents[2]
+def build_emulator_env(config: Config | None = None) -> dict[str, str]:
+    """Return an environment dict with SDL controller hints for subprocesses.
+
+    Passing this to ``subprocess.Popen(env=...)`` ensures every SDL2-based
+    emulator (current *and* future) can detect gamepads the moment it starts.
+    """
+    env = dict(os.environ)
+    env["SDL_GAMECONTROLLER_ALLOW_BACKGROUND_EVENTS"] = "1"
+    env["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
+
+    return env
+
 # -- INI-file helpers (RetroArch key = "value" format) ----------------------
 
 def _patch_retroarch_cfg(path: Path, patches: dict[str, str]) -> None:
@@ -377,60 +346,6 @@ def _patch_retroarch_cfg(path: Path, patches: dict[str, str]) -> None:
     for key, value in sorted(remaining.items()):
         result.append(f'{key} = "{value}"')
 
-    path.write_text("\n".join(result) + "\n", encoding="utf-8")
-
-
-# -- PPSSPP control-mapping helper (duplicate-key INI) ---------------------
-
-def _patch_ppsspp_controls(path: Path, pad_mappings: dict[str, str]) -> None:
-    """Update gamepad (device 10) control mappings in a PPSSPP INI file.
-
-    PPSSPP allows duplicate keys (e.g. pad *and* keyboard for the same
-    action) so we cannot use :mod:`configparser`.  This function replaces
-    existing ``10-*`` (pad) entries while preserving keyboard and other
-    device bindings.
-    """
-    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-    lines = text.splitlines()
-
-    result: list[str] = []
-    in_section = False
-    found_section = False
-    pad_prefix = "10-"
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped == "[ControlMapping]":
-            found_section = True
-            in_section = True
-            result.append(line)
-            # Inject our pad mappings at the top of the section
-            for action, value in pad_mappings.items():
-                result.append(f"{action} = {value}")
-            continue
-
-        if in_section:
-            if stripped.startswith("["):
-                in_section = False
-                result.append(line)
-                continue
-            # Drop old pad bindings — we already wrote our new ones
-            if "=" in stripped:
-                _val = stripped.split("=", 1)[1].strip()
-                if _val.startswith(pad_prefix):
-                    continue
-            result.append(line)
-        else:
-            result.append(line)
-
-    if not found_section:
-        result.append("")
-        result.append("[ControlMapping]")
-        for action, value in pad_mappings.items():
-            result.append(f"{action} = {value}")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(result) + "\n", encoding="utf-8")
 
 
@@ -538,50 +453,16 @@ def _copy_bios_to_dir(ctx: _SetupContext, dest_dir: Path) -> None:
 
 
 # =========================================================================
-# Standard XInput / SDL gamepad button indices
-# =========================================================================
-# These map Meridian's abstract binding names to the numeric button/axis
-# indices used by SDL2 Game Controller (which XInput gamepads expose).
-#
-# SDL2 Game Controller standard mapping (matches Xbox layout):
-#   Button 0 = A,  1 = B,  2 = X,  3 = Y
-#   Button 4 = Back/Select,  5 = Guide/Home,  6 = Start
-#   Button 7 = Left Stick Press,  8 = Right Stick Press
-#   Button 9 = Left Shoulder (LB),  10 = Right Shoulder (RB)
-#   Button 11 = DPad Up,  12 = DPad Down,  13 = DPad Left,  14 = DPad Right
-#   Axis 0 = Left Stick X,  Axis 1 = Left Stick Y
-#   Axis 2 = Right Stick X,  Axis 3 = Right Stick Y
-#   Axis 4 = Left Trigger,   Axis 5 = Right Trigger
-
-_SDL_BUTTON_MAP: dict[str, int] = {
-    # Nintendo convention: A=east(1), B=south(0), X=north(3), Y=west(2)
-    "a": 1, "b": 0, "x": 3, "y": 2,
-    "minus": 4, "home": 5, "plus": 6,
-    "ls_press": 7, "rs_press": 8,
-    "l": 9, "r": 10,
-    "dp_up": 11, "dp_down": 12, "dp_left": 13, "dp_right": 14,
-    "capture": 15,
-}
-
-_SDL_AXIS_MAP: dict[str, tuple[int, str]] = {
-    "ls_left": (0, "-"), "ls_right": (0, "+"),
-    "ls_up": (1, "-"), "ls_down": (1, "+"),
-    "rs_left": (2, "-"), "rs_right": (2, "+"),
-    "rs_up": (3, "-"), "rs_down": (3, "+"),
-    "zl": (4, "+"), "zr": (5, "+"),
-}
-
-
-# =========================================================================
 # Per-emulator setup handlers
 # =========================================================================
 
+
 # -- RetroArch -------------------------------------------------------------
 
+
 def _setup_retroarch(ctx: _SetupContext) -> None:
-    """Patch retroarch.cfg with absolute paths and controller mappings."""
+    """Patch retroarch.cfg with absolute BIOS / ROM paths."""
     cfg_path = ctx.install_dir / "retroarch.cfg"
-    # Create the file if it doesn't exist (e.g. fresh install).
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     if not cfg_path.exists():
         cfg_path.write_text("", encoding="utf-8")
@@ -589,66 +470,12 @@ def _setup_retroarch(ctx: _SetupContext) -> None:
     system_dir = str((ctx.install_dir / "system").resolve())
     patches: dict[str, str] = {
         "system_directory": system_dir,
-        "input_autodetect_enable": "true",
     }
-
-    # Use SDL2 by default — it has the best modern controller support
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        patches["input_driver"] = inp.driver if inp.driver != "keyboard" else "sdl2"
-        patches["input_joypad_driver"] = inp.driver if inp.driver != "keyboard" else "sdl2"
-    else:
-        patches["input_driver"] = "sdl2"
-        patches["input_joypad_driver"] = "sdl2"
 
     if ctx.rom_dir:
         patches["rgui_browser_directory"] = ctx.rom_dir
         patches["content_directory"] = ctx.rom_dir
 
-    # Write gamepad button mappings for player 1 using Meridian's bindings.
-    # RetroArch uses SNES naming and Meridian uses Nintendo Switch naming
-    # — both place A on the east (right) and B on the south (bottom),
-    # so the mapping is direct with no swap needed.
-    if inp.is_gamepad:
-        ra_btns = {
-            "a":      str(inp.resolve_button("a")),
-            "b":      str(inp.resolve_button("b")),
-            "x":      str(inp.resolve_button("x")),
-            "y":      str(inp.resolve_button("y")),
-            "l":      str(inp.resolve_button("l")),
-            "r":      str(inp.resolve_button("r")),
-            "l3":     str(inp.resolve_button("ls_press")),
-            "r3":     str(inp.resolve_button("rs_press")),
-            "start":  str(inp.resolve_button("plus")),
-            "select": str(inp.resolve_button("minus")),
-            "up":     str(inp.resolve_button("dp_up")),
-            "down":   str(inp.resolve_button("dp_down")),
-            "left":   str(inp.resolve_button("dp_left")),
-            "right":  str(inp.resolve_button("dp_right")),
-        }
-        for ra_name, btn_idx in ra_btns.items():
-            patches[f"input_player1_{ra_name}_btn"] = btn_idx
-
-        # Analog sticks — resolve from user bindings
-        for ra_key, m_name in [
-            ("l_x_plus_axis", "ls_right"), ("l_x_minus_axis", "ls_left"),
-            ("l_y_plus_axis", "ls_down"),  ("l_y_minus_axis", "ls_up"),
-            ("r_x_plus_axis", "rs_right"), ("r_x_minus_axis", "rs_left"),
-            ("r_y_plus_axis", "rs_down"),  ("r_y_minus_axis", "rs_up"),
-        ]:
-            ax, d = inp.resolve_axis(m_name)
-            patches[f"input_player1_{ra_key}"] = f"{d}{ax}"
-
-        # Triggers
-        zl_ax, zl_d = inp.resolve_axis("zl")
-        zr_ax, zr_d = inp.resolve_axis("zr")
-        patches["input_player1_l2_axis"] = f"{zl_d}{zl_ax}"
-        patches["input_player1_r2_axis"] = f"{zr_d}{zr_ax}"
-
-        patches["input_player1_joypad_index"] = "0"
-        patches["input_player1_analog_dpad_mode"] = "0"
-
-    # Ensure BIOS files are copied to the system directory
     bios_dir = Path(system_dir)
     bios_dir.mkdir(parents=True, exist_ok=True)
     _copy_bios_to_dir(ctx, bios_dir)
@@ -658,8 +485,9 @@ def _setup_retroarch(ctx: _SetupContext) -> None:
 
 # -- DuckStation -----------------------------------------------------------
 
+
 def _setup_duckstation(ctx: _SetupContext) -> None:
-    """Configure DuckStation for portable mode with BIOS, ROM paths, and input."""
+    """Configure DuckStation for portable mode with BIOS and ROM paths."""
     _ensure_portable(ctx.exe_path.parent)
 
     bios_dir = ctx.exe_path.parent / "bios"
@@ -683,44 +511,14 @@ def _setup_duckstation(ctx: _SetupContext) -> None:
             "RecursivePaths": ctx.rom_dir,
         }
 
-    # Controller mapping — DuckStation uses SDL Game Controller indices
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        patches["Pad1"] = {
-            "Type": "AnalogController",
-            "Up": "SDL-0/DPadUp",
-            "Down": "SDL-0/DPadDown",
-            "Left": "SDL-0/DPadLeft",
-            "Right": "SDL-0/DPadRight",
-            "Triangle": "SDL-0/Y",
-            "Circle": "SDL-0/B",
-            "Cross": "SDL-0/A",
-            "Square": "SDL-0/X",
-            "L1": "SDL-0/LeftShoulder",
-            "R1": "SDL-0/RightShoulder",
-            "L2": "SDL-0/+LeftTrigger",
-            "R2": "SDL-0/+RightTrigger",
-            "L3": "SDL-0/LeftStick",
-            "R3": "SDL-0/RightStick",
-            "Select": "SDL-0/Back",
-            "Start": "SDL-0/Start",
-            "LLeft": "SDL-0/-LeftX",
-            "LRight": "SDL-0/+LeftX",
-            "LUp": "SDL-0/-LeftY",
-            "LDown": "SDL-0/+LeftY",
-            "RLeft": "SDL-0/-RightX",
-            "RRight": "SDL-0/+RightX",
-            "RUp": "SDL-0/-RightY",
-            "RDown": "SDL-0/+RightY",
-        }
-
     _patch_ini(settings_path, patches)
 
 
 # -- PCSX2 ----------------------------------------------------------------
 
+
 def _setup_pcsx2(ctx: _SetupContext) -> None:
-    """Configure PCSX2 portable with BIOS directory and controller."""
+    """Configure PCSX2 portable with BIOS directory."""
     _ensure_portable(ctx.exe_path.parent, marker="portable.ini")
 
     bios_dir = ctx.exe_path.parent / "bios"
@@ -748,44 +546,13 @@ def _setup_pcsx2(ctx: _SetupContext) -> None:
             "RecursivePaths": ctx.rom_dir,
         }
 
-    # PCSX2 v2 (pcsx2-qt) uses SDL Game Controller names
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        patches["Pad1"] = {
-            "Type": "DualShock2",
-            "Up": "SDL-0/DPadUp",
-            "Down": "SDL-0/DPadDown",
-            "Left": "SDL-0/DPadLeft",
-            "Right": "SDL-0/DPadRight",
-            "Triangle": "SDL-0/Y",
-            "Circle": "SDL-0/B",
-            "Cross": "SDL-0/A",
-            "Square": "SDL-0/X",
-            "L1": "SDL-0/LeftShoulder",
-            "R1": "SDL-0/RightShoulder",
-            "L2": "SDL-0/+LeftTrigger",
-            "R2": "SDL-0/+RightTrigger",
-            "L3": "SDL-0/LeftStick",
-            "R3": "SDL-0/RightStick",
-            "Select": "SDL-0/Back",
-            "Start": "SDL-0/Start",
-            "LLeft": "SDL-0/-LeftX",
-            "LRight": "SDL-0/+LeftX",
-            "LUp": "SDL-0/-LeftY",
-            "LDown": "SDL-0/+LeftY",
-            "RLeft": "SDL-0/-RightX",
-            "RRight": "SDL-0/+RightX",
-            "RUp": "SDL-0/-RightY",
-            "RDown": "SDL-0/+RightY",
-        }
-
     _patch_ini(settings_path, patches)
 
 
 # -- PPSSPP ----------------------------------------------------------------
 
 def _setup_ppsspp(ctx: _SetupContext) -> None:
-    """Configure PPSSPP portable with flash0 BIOS assets and controller."""
+    """Configure PPSSPP portable with flash0 BIOS assets."""
     memstick = ctx.install_dir / "memstick"
     memstick.mkdir(parents=True, exist_ok=True)
 
@@ -806,40 +573,15 @@ def _setup_ppsspp(ctx: _SetupContext) -> None:
 
     if ini_path.exists():
         _patch_ini(ini_path, patches)
-
-    # Write gamepad control mapping.  PPSSPP uses NKCODE values with a
-    # device prefix (10 = first gamepad).  The format allows duplicate keys
-    # (pad + keyboard) so we use a custom patcher instead of configparser.
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        _patch_ppsspp_controls(ini_path, {
-            "Up":       "10-19",
-            "Down":     "10-20",
-            "Left":     "10-21",
-            "Right":    "10-22",
-            "Circle":   "10-97",
-            "Cross":    "10-96",
-            "Square":   "10-99",
-            "Triangle": "10-100",
-            "Start":    "10-108",
-            "Select":   "10-109",
-            "L":        "10-102",
-            "R":        "10-103",
-            "An.Up":    "10-4001",
-            "An.Down":  "10-4003",
-            "An.Left":  "10-4000",
-            "An.Right": "10-4002",
-            "RightAn.Up":    "10-4005",
-            "RightAn.Down":  "10-4007",
-            "RightAn.Left":  "10-4004",
-            "RightAn.Right": "10-4006",
-        })
+    else:
+        _patch_ini(ini_path, patches)
 
 
 # -- Dolphin ---------------------------------------------------------------
 
+
 def _setup_dolphin(ctx: _SetupContext) -> None:
-    """Configure Dolphin in portable mode with ROM paths and controller."""
+    """Configure Dolphin in portable mode with ROM paths."""
     _ensure_portable(ctx.exe_path.parent)
 
     user_dir = ctx.exe_path.parent / "User"
@@ -858,11 +600,7 @@ def _setup_dolphin(ctx: _SetupContext) -> None:
         "General": {
             "ISOPaths": "1",
         },
-        "Core": {
-            # Ensure GC Port 1 is an emulated pad; without this, mappings in
-            # GCPadNew.ini can exist but remain inactive.
-            "SIDevice0": "6",
-        },
+        "Core": {},
         "Interface": {
             "ConfirmStop": "false",
         },
@@ -872,46 +610,11 @@ def _setup_dolphin(ctx: _SetupContext) -> None:
 
     _patch_ini(ini_path, patches)
 
-    # Write GCPad controller profile for standard SDL gamepads.
-    # Always overwrite so Meridian stays authoritative for input config.
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        gcpad_path = config_dir / "GCPadNew.ini"
-        device_name = inp.device.strip()
-        if not device_name or device_name.lower() == "any available":
-            device_name = "Gamepad"
-        gcpad_path.write_text(textwrap.dedent("""\
-            [GCPad1]
-            Device = SDL/0/{device_name}
-            Buttons/A = `Button S`
-            Buttons/B = `Button E`
-            Buttons/X = `Button N`
-            Buttons/Y = `Button W`
-            Buttons/Z = `Shoulder R`
-            Buttons/Start = `Start`
-            D-Pad/Up = `Pad N`
-            D-Pad/Down = `Pad S`
-            D-Pad/Left = `Pad W`
-            D-Pad/Right = `Pad E`
-            Triggers/L = `Shoulder L`
-            Triggers/R = `Trigger R`
-            Triggers/L-Analog = `Full Axis 4+`
-            Triggers/R-Analog = `Full Axis 5+`
-            Main Stick/Up = `Left Y-`
-            Main Stick/Down = `Left Y+`
-            Main Stick/Left = `Left X-`
-            Main Stick/Right = `Left X+`
-            C-Stick/Up = `Right Y-`
-            C-Stick/Down = `Right Y+`
-            C-Stick/Left = `Right X-`
-            C-Stick/Right = `Right X+`
-        """.format(device_name=device_name)), encoding="utf-8")
-
 
 # -- Cemu ------------------------------------------------------------------
 
 def _setup_cemu(ctx: _SetupContext) -> None:
-    """Configure Cemu in portable mode with keys, ROM paths, and controller."""
+    """Configure Cemu in portable mode with keys, ROM paths, and input profiles."""
     portable_dir = ctx.exe_path.parent / "portable"
     portable_dir.mkdir(parents=True, exist_ok=True)
 
@@ -950,120 +653,14 @@ def _setup_cemu(ctx: _SetupContext) -> None:
         except Exception:
             pass
 
-    # Generate Cemu controller profile
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        _write_cemu_controller_profile(ctx)
-
-
-def _write_cemu_controller_profile(ctx: _SetupContext) -> None:
-    """Write the active Wii U GamePad controller config for Cemu.
-
-    Cemu's InputManager auto-loads ``controllerProfiles/controller0.xml``
-    for player-index 0 (the Wii U GamePad slot).  Named profiles like
-    ``meridian_gamepad.xml`` are only loaded through the GUI, so we must
-    write directly to ``controller0.xml``.
-    """
-    # Cemu stores controller profiles as XML in controllerProfiles/
-    profiles_dir = ctx.exe_path.parent / "controllerProfiles"
-    if not profiles_dir.exists():
-        # Try portable subdir
-        profiles_dir = ctx.exe_path.parent / "portable" / "controllerProfiles"
-    profiles_dir.mkdir(parents=True, exist_ok=True)
-
-    profile_path = profiles_dir / "controller0.xml"
-
-    # Cemu SDLController.cpp builds the uuid as:
-    #   m_uuid = fmt::format("{}_", guid_index) + SDL_JoystickGetGUIDString(guid)
-    # i.e. "{device_index}_{sdl_guid_hex}" — index comes FIRST.
-    inp = ctx.input_cfg
-    cemu_uuid = "0_0"
-    if inp.sdl_guid:
-        cemu_uuid = f"{inp.sdl_device_index}_{inp.sdl_guid}"
-
-    # Mapping IDs and button values taken from an actual working Cemu
-    # controller config (Wii U Pro Controller type with SDLController).
-    # Face buttons use the Nintendo→SDL positional swap (A=east→SDL B,
-    # B=south→SDL A, etc.).  Axes use both positive AND negative
-    # Buttons2 enum values.  ALL entries use <button>.
-    _entries = [
-        # Wii U Pro Controller face buttons — positional mapping
-        (1,  1),   # A (east)   → SDL B (east)
-        (2,  0),   # B (south)  → SDL A (south)
-        (3,  3),   # X (north)  → SDL Y (north)
-        (4,  2),   # Y (west)   → SDL X (west)
-        # Shoulders
-        (5,  9),   # L          → SDL LB
-        (6,  10),  # R          → SDL RB
-        # Triggers  (kTriggerXP=42, kTriggerYP=43)
-        (7,  42),  # ZL         → kTriggerXP
-        (8,  43),  # ZR         → kTriggerYP
-        # Plus / Minus
-        (9,  6),   # Plus       → SDL Start
-        (10, 4),   # Minus      → SDL Back
-        # D-Pad
-        (12, 11),  # DPad Up    → SDL DPAD_UP
-        (13, 12),  # DPad Down  → SDL DPAD_DOWN
-        (14, 13),  # DPad Left  → SDL DPAD_LEFT
-        (15, 14),  # DPad Right → SDL DPAD_RIGHT
-        # Stick clicks
-        (16, 7),   # L-Click    → SDL LeftStick
-        (17, 8),   # R-Click    → SDL RightStick
-        # Left stick axes (kAxisXP=38,XN=44,YP=39,YN=45)
-        (18, 45),  # LStick Up    → kAxisYN
-        (19, 39),  # LStick Down  → kAxisYP
-        (20, 44),  # LStick Left  → kAxisXN
-        (21, 38),  # LStick Right → kAxisXP
-        # Right stick axes (kRotationXP=40,XN=46,YP=41,YN=47)
-        (22, 47),  # RStick Up    → kRotationYN
-        (23, 41),  # RStick Down  → kRotationYP
-        (24, 46),  # RStick Left  → kRotationXN
-        (25, 40),  # RStick Right → kRotationXP
-    ]
-
-    mapping_lines = "\n".join(
-        f"            <entry>\n"
-        f"                <mapping>{m}</mapping>\n"
-        f"                <button>{b}</button>\n"
-        f"            </entry>"
-        for m, b in _entries
-    )
-
-    profile_xml = textwrap.dedent(f"""\
-        <?xml version="1.0" encoding="UTF-8"?>
-        <emulated_controller>
-            <type>Wii U Pro Controller</type>
-            <controller>
-                <api>SDLController</api>
-                <uuid>{cemu_uuid}</uuid>
-                <display_name>{inp.device}</display_name>
-                <rumble>0</rumble>
-                <axis>
-                    <deadzone>0.25</deadzone>
-                    <range>1</range>
-                </axis>
-                <rotation>
-                    <deadzone>0.25</deadzone>
-                    <range>1</range>
-                </rotation>
-                <trigger>
-                    <deadzone>0.15</deadzone>
-                    <range>1</range>
-                </trigger>
-                <mappings>
-        {mapping_lines}
-                </mappings>
-            </controller>
-        </emulated_controller>
-    """)
-
-    profile_path.write_text(profile_xml, encoding="utf-8")
+    # Input profiles are now handled by the Cemu extension via
+    # _run_extension_input() — no emulator-specific wiring needed here.
 
 
 # -- melonDS ---------------------------------------------------------------
 
 def _setup_melonds(ctx: _SetupContext) -> None:
-    """Configure melonDS with BIOS paths and controller."""
+    """Configure melonDS with BIOS paths."""
     _ensure_portable(ctx.exe_path.parent)
 
     bios_dir = ctx.exe_path.parent / "bios"
@@ -1075,13 +672,8 @@ def _setup_melonds(ctx: _SetupContext) -> None:
 
     bios_dir_str = str(bios_dir.resolve()).replace("\\", "/")
 
-    inp = ctx.input_cfg
-
     if toml_path.exists():
         _patch_melonds_toml(toml_path, bios_dir_str, ctx.rom_dir)
-        # Write joystick button mappings using user bindings
-        if inp.is_gamepad:
-            _patch_melonds_toml_joystick(toml_path, inp)
     elif ini_path.exists():
         patches: dict[str, dict[str, str]] = {
             "": {
@@ -1092,21 +684,6 @@ def _setup_melonds(ctx: _SetupContext) -> None:
         }
         if ctx.rom_dir:
             patches[""]["LastROMFolder"] = ctx.rom_dir
-        # Write joystick button mappings for INI format
-        if inp.is_gamepad:
-            patches[""]["Joy_A"]      = str(inp.resolve_button("a"))
-            patches[""]["Joy_B"]      = str(inp.resolve_button("b"))
-            patches[""]["Joy_X"]      = str(inp.resolve_button("x"))
-            patches[""]["Joy_Y"]      = str(inp.resolve_button("y"))
-            patches[""]["Joy_Select"] = str(inp.resolve_button("minus"))
-            patches[""]["Joy_Start"]  = str(inp.resolve_button("plus"))
-            patches[""]["Joy_Up"]     = str(inp.resolve_button("dp_up"))
-            patches[""]["Joy_Down"]   = str(inp.resolve_button("dp_down"))
-            patches[""]["Joy_Left"]   = str(inp.resolve_button("dp_left"))
-            patches[""]["Joy_Right"]  = str(inp.resolve_button("dp_right"))
-            patches[""]["Joy_L"]      = str(inp.resolve_button("l"))
-            patches[""]["Joy_R"]      = str(inp.resolve_button("r"))
-            patches[""]["JoystickID"] = "0"
         _patch_ini(ini_path, patches)
 
 
@@ -1133,194 +710,72 @@ def _patch_melonds_toml(path: Path, bios_dir: str, rom_dir: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _patch_melonds_toml_joystick(path: Path, inp: _InputConfig) -> None:
-    """Write ``[Instance0.Joystick]`` button mappings into a melonDS TOML.
-
-    Uses a section-scoped approach: splits the file into lines, locates
-    the ``[Instance0.Joystick]`` section, and replaces values only
-    within that section — avoiding incorrect matches in the Keyboard or
-    other sections that share the same key names.
-    """
-    text = path.read_text(encoding="utf-8", errors="replace")
-
-    joy_map = {
-        "A":      str(inp.resolve_button("a")),
-        "B":      str(inp.resolve_button("b")),
-        "X":      str(inp.resolve_button("x")),
-        "Y":      str(inp.resolve_button("y")),
-        "Select": str(inp.resolve_button("minus")),
-        "Start":  str(inp.resolve_button("plus")),
-        "Up":     str(inp.resolve_button("dp_up")),
-        "Down":   str(inp.resolve_button("dp_down")),
-        "Left":   str(inp.resolve_button("dp_left")),
-        "Right":  str(inp.resolve_button("dp_right")),
-        "L":      str(inp.resolve_button("l")),
-        "R":      str(inp.resolve_button("r")),
-    }
-
-    section_header = "[Instance0.Joystick]"
-    lines = text.splitlines()
-
-    # Find the section boundaries
-    sec_start: int | None = None
-    sec_end: int | None = None
-    for i, line in enumerate(lines):
-        if line.strip() == section_header:
-            sec_start = i
-        elif sec_start is not None and line.strip().startswith("["):
-            sec_end = i
-            break
-    if sec_start is not None and sec_end is None:
-        sec_end = len(lines)
-
-    if sec_start is not None:
-        # Replace values ONLY inside the [Instance0.Joystick] section
-        remaining = dict(joy_map)
-        for i in range(sec_start + 1, sec_end):
-            stripped = lines[i].strip()
-            if "=" in stripped:
-                lhs = stripped.split("=", 1)[0].strip()
-                if lhs in remaining:
-                    lines[i] = f"{lhs} = {remaining.pop(lhs)}"
-        # Append any keys that weren't found in the section
-        insert_at = sec_end
-        for key, value in remaining.items():
-            lines.insert(insert_at, f"{key} = {value}")
-            insert_at += 1
-    else:
-        # Section doesn't exist — append it
-        lines.append("")
-        lines.append(section_header)
-        for key, value in joy_map.items():
-            lines.append(f"{key} = {value}")
-
-    text = "\n".join(lines)
-
-    # Ensure JoystickID is set (in [Instance0], not inside Joystick)
-    jid_pattern = r'^(\s*JoystickID\s*=\s*)([^\n]+)'
-    text, n = re.subn(jid_pattern, r'\g<1>0', text, count=1, flags=re.MULTILINE)
-    if n == 0:
-        text = text.rstrip() + "\nJoystickID = 0\n"
-
-    path.write_text(text + "\n", encoding="utf-8")
-
-
 # -- Ryubing / Ryujinx ----------------------------------------------------
 
 def _setup_ryubing(ctx: _SetupContext) -> None:
-    """Configure Ryubing/Ryujinx with keys paths and controller."""
+    """Configure Ryubing/Ryujinx with keys and firmware paths.
+
+    Keys are written once to ``portable/system/``.
+    Firmware NCA files are only extracted if the registered directory is
+    empty — they are never re-extracted on subsequent launches, which
+    prevents the "files appearing in multiple places" problem.
+    """
     publish_dir = ctx.install_dir / "publish"
     exe_dir = publish_dir if publish_dir.exists() else ctx.exe_path.parent
 
     portable_dir = exe_dir / "portable"
     portable_dir.mkdir(parents=True, exist_ok=True)
+    log.debug("Ryubing portable dir: %s", portable_dir)
 
-    # Copy prod.keys and title.keys
     bios_cfg = dict(getattr(ctx.config, "bios_files", {}) or {})
+
+    # Keys go to portable/system/ ONLY (Ryujinx portable mode reads from here)
+    system_dir = portable_dir / "system"
+    system_dir.mkdir(parents=True, exist_ok=True)
     for bios_id, filename in [
         ("switch_prod_keys", "prod.keys"),
         ("switch_title_keys", "title.keys"),
     ]:
         src = str(bios_cfg.get(bios_id, "")).strip()
-        if src and Path(src).exists():
-            # Different Ryujinx/Ryubing builds may read from either
-            # portable/system or <exe-dir>/system.
-            for system_dir in [portable_dir / "system", exe_dir / "system"]:
-                system_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    shutil.copy2(src, system_dir / filename)
-                except Exception:
-                    pass
+        if not src:
+            continue
+        src_path = Path(src)
+        if not src_path.exists():
+            log.warning("Switch %s path set but file not found: %s", bios_id, src)
+            continue
+        dest = system_dir / filename
+        try:
+            if not dest.exists() or dest.stat().st_mtime < src_path.stat().st_mtime:
+                shutil.copy2(src_path, dest)
+                log.debug("Copied %s -> %s", src, dest)
+        except Exception:
+            log.debug("Failed to copy %s to %s", src, dest)
 
-    # Provision firmware for portable builds from a file or directory.
-    # Accepts:
-    #   - directory containing *.nca
-    #   - directory containing .../Contents/registered/*.nca
-    #   - zip archive with *.nca files
     fw_src = str(bios_cfg.get("switch_firmware", "")).strip()
     if fw_src:
-        _provision_ryujinx_firmware(Path(fw_src), portable_dir)
+        registered_dir = portable_dir / "bis" / "system" / "Contents" / "registered"
+        existing_ncas = list(registered_dir.glob("*.nca")) if registered_dir.exists() else []
+        if existing_ncas:
+            log.debug(
+                "Ryubing firmware already provisioned (%d NCA files present), skipping",
+                len(existing_ncas),
+            )
+        else:
+            _provision_ryujinx_firmware(Path(fw_src), portable_dir)
+    else:
+        log.warning("No switch_firmware BIOS path configured")
 
-    # Always write / merge controller config so Meridian stays authoritative.
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        input_entry = {
-            "left_joycon_stick": {
-                "joystick": "Left",
-                "invert_stick_x": False,
-                "invert_stick_y": False,
-                "rotate90_cw": False,
-                "stick_button": "LeftStick",
-            },
-            "right_joycon_stick": {
-                "joystick": "Right",
-                "invert_stick_x": False,
-                "invert_stick_y": False,
-                "rotate90_cw": False,
-                "stick_button": "RightStick",
-            },
-            "left_joycon": {
-                "button_minus": "Minus",
-                "button_l": "LeftShoulder",
-                "button_zl": "LeftTrigger",
-                "button_sl": "Unbound",
-                "button_sr": "Unbound",
-                "dpad_up": "DpadUp",
-                "dpad_down": "DpadDown",
-                "dpad_left": "DpadLeft",
-                "dpad_right": "DpadRight",
-            },
-            "right_joycon": {
-                "button_plus": "Plus",
-                "button_r": "RightShoulder",
-                "button_zr": "RightTrigger",
-                "button_sl": "Unbound",
-                "button_sr": "Unbound",
-                "button_x": "X",
-                "button_b": "B",
-                "button_y": "Y",
-                "button_a": "A",
-            },
-            "version": 1,
-            "backend": "GamepadSDL2",
-            "id": f"{inp.sdl_device_index}-{inp.sdl_guid}" if inp.sdl_guid else "0",
-            "controller_type": "ProController",
-            "player_index": "Player1",
-            "deadzone_left": 0.1,
-            "deadzone_right": 0.1,
-            "range_left": 1.0,
-            "range_right": 1.0,
-            "trigger_threshold": 0.5,
-            "motion": {
-                "motion_backend": "GamepadDriver",
-                "sensitivity": 100,
-                "gyro_deadzone": 1,
-                "enable_motion": True,
-            },
-            "rumble": {
-                "strong_rumble": 1.0,
-                "weak_rumble": 1.0,
-                "enable_rumble": True,
-            },
-        }
-        config_candidates = [
-            portable_dir / "Config" / "Config.json",
-            portable_dir / "Config.json",
-        ]
-        for config_json in config_candidates:
-            _merge_ryujinx_input_config(config_json, input_entry)
 
 
 def _provision_ryujinx_firmware(source: Path, portable_dir: Path) -> None:
     """Copy/extract Switch firmware NCA files into portable bis layout."""
     try:
         if not source.exists():
+            log.warning("Switch firmware source does not exist: %s", source)
             return
 
         registered_dirs = [
             portable_dir / "bis" / "system" / "Contents" / "registered",
-            # Some forks/builds also probe this sibling layout.
-            portable_dir / "system" / "Contents" / "registered",
         ]
         for rd in registered_dirs:
             rd.mkdir(parents=True, exist_ok=True)
@@ -1340,6 +795,7 @@ def _provision_ryujinx_firmware(source: Path, portable_dir: Path) -> None:
             return copied
 
         if source.is_file() and source.suffix.lower() == ".zip":
+            extracted = 0
             try:
                 with zipfile.ZipFile(source, "r") as zf:
                     for info in zf.infolist():
@@ -1355,10 +811,15 @@ def _provision_ryujinx_firmware(source: Path, portable_dir: Path) -> None:
                             try:
                                 with zf.open(info, "r") as src_fh, open(dest, "wb") as dst_fh:
                                     shutil.copyfileobj(src_fh, dst_fh)
+                                extracted += 1
                             except Exception:
                                 continue
             except Exception:
+                log.exception("Failed to extract firmware zip: %s", source)
                 return
+            log.info("Extracted %d NCA files from firmware zip to %s",
+                     extracted, registered_dirs[0])
+            return
 
         if source.is_file() and source.suffix.lower() == ".nca":
             for dest_dir in registered_dirs:
@@ -1369,8 +830,6 @@ def _provision_ryujinx_firmware(source: Path, portable_dir: Path) -> None:
             return
 
         if source.is_dir():
-            # Try all likely roots and aggregate files, do not stop at first
-            # partial hit (some dumps contain mixed/partial layouts).
             candidate_dirs = [
                 source / "registered",
                 source / "Contents" / "registered",
@@ -1379,42 +838,24 @@ def _provision_ryujinx_firmware(source: Path, portable_dir: Path) -> None:
                 source,
             ]
             seen: set[str] = set()
+            total = 0
             for cand in candidate_dirs:
                 key = str(cand.resolve()) if cand.exists() else str(cand)
                 if key in seen:
                     continue
                 seen.add(key)
                 if cand.exists():
-                    _copy_nca_tree(cand)
+                    total += _copy_nca_tree(cand)
+            log.info("Copied %d NCA files from firmware directory to %s",
+                     total, registered_dirs[0])
     except Exception:
-        pass
-
-
-def _merge_ryujinx_input_config(config_json: Path, input_entry: dict[str, Any]) -> None:
-    """Merge gamepad config into a Ryujinx/Ryubing Config.json variant."""
-    try:
-        config_json.parent.mkdir(parents=True, exist_ok=True)
-        if config_json.exists():
-            data = json.loads(config_json.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                data = {}
-        else:
-            data = {}
-
-        data.setdefault("version", 70)
-        data["enable_keyboard"] = False
-        data["enable_mouse"] = False
-        data["input_config"] = [input_entry]
-
-        config_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        log.exception("Failed to provision Switch firmware from %s", source)
 
 
 # -- Eden ------------------------------------------------------------------
 
 def _setup_eden(ctx: _SetupContext) -> None:
-    """Configure Eden (Yuzu fork) with keys paths."""
+    """Configure Eden (Yuzu fork) with keys."""
     user_dir = ctx.exe_path.parent / "user"
     keys_dir = user_dir / "keys"
     keys_dir.mkdir(parents=True, exist_ok=True)
@@ -1431,149 +872,30 @@ def _setup_eden(ctx: _SetupContext) -> None:
             except Exception:
                 pass
 
+# -- Azahar (Citra fork) ---------------------------------------------------
 
-# -- Citra -----------------------------------------------------------------
+def _setup_azahar(ctx: _SetupContext) -> None:
+    """Configure Azahar with BIOS files.
 
-def _setup_citra(ctx: _SetupContext) -> None:
-    """Configure Citra with BIOS and gamepad profile."""
+    Azahar uses the same directory layout as Citra: BIOS files
+    (``aes_keys.txt``, ``seeddb.bin``, etc.) go into ``user/sysdata``.
+    """
     sysdata_dir = ctx.exe_path.parent / "user" / "sysdata"
     sysdata_dir.mkdir(parents=True, exist_ok=True)
     _copy_bios_to_dir(ctx, sysdata_dir)
 
-    inp = ctx.input_cfg
-    if not inp.is_gamepad:
-        return
+# -- Citra -----------------------------------------------------------------
 
-    qt_ini = ctx.exe_path.parent / "user" / "config" / "qt-config.ini"
-    if not qt_ini.exists():
-        return
-
-    guid = inp.sdl_guid or "00000000000000000000000000000000"
-    port = str(inp.sdl_device_index)
-
-    def _citra_digital_expr(binding_name: str) -> str:
-        raw = str(inp.bindings.get(binding_name, "")).strip()
-        if raw.startswith("Button "):
-            try:
-                idx = int(raw.split()[1])
-                return f"button:{idx},engine:sdl,guid:{guid},port:{port}"
-            except Exception:
-                pass
-        if raw.startswith("Axis "):
-            try:
-                token = raw.split()[1]
-                axis = int(token[:-1])
-                direction = token[-1]
-                threshold = "0.5" if direction == "+" else "-0.5"
-                return (
-                    f"axis:{axis},direction:{direction},engine:sdl,"
-                    f"guid:{guid},port:{port},threshold:{threshold}"
-                )
-            except Exception:
-                pass
-        if raw.startswith("Hat "):
-            try:
-                parts = raw.split()
-                hat_idx = int(parts[1])
-                dirs = (parts[2] if len(parts) >= 3 else "").lower().split("+")
-                for d in dirs:
-                    if d in ("up", "down", "left", "right"):
-                        return (
-                            f"direction:{d},engine:sdl,guid:{guid},"
-                            f"hat:{hat_idx},port:{port}"
-                        )
-            except Exception:
-                pass
-        # Fallback to the normalized SDL defaults.
-        btn_idx = inp.resolve_button(binding_name)
-        return f"button:{btn_idx},engine:sdl,guid:{guid},port:{port}"
-
-    def _citra_analog_expr(x_neg_name: str, x_pos_name: str, y_neg_name: str, y_pos_name: str) -> str:
-        x_neg_axis, _ = inp.resolve_axis(x_neg_name)
-        x_pos_axis, _ = inp.resolve_axis(x_pos_name)
-        y_neg_axis, _ = inp.resolve_axis(y_neg_name)
-        y_pos_axis, _ = inp.resolve_axis(y_pos_name)
-
-        # Citra stores analog maps in analog_from_button encoded format.
-        # Keep this stable and SDL-backed to avoid keyboard-only defaults.
-        return (
-            "down:axis${y_pos}$1direction$0+$1engine$0sdl$1guid$0{guid}$1port$0{port}$1threshold$00.5,"
-            "engine:analog_from_button,"
-            "left:axis${x_neg}$1direction$0-$1engine$0sdl$1guid$0{guid}$1port$0{port}$1threshold$0-0.5,"
-            "modifier:code$068$1engine$0keyboard,modifier_scale:0.500000,"
-            "right:axis${x_pos}$1direction$0+$1engine$0sdl$1guid$0{guid}$1port$0{port}$1threshold$00.5,"
-            "up:axis${y_neg}$1direction$0-$1engine$0sdl$1guid$0{guid}$1port$0{port}$1threshold$0-0.5"
-        ).format(
-            # Citra's parser expects zero-padded axis indices in this encoded
-            # analog_from_button grammar (e.g. axis$00, axis$01).
-            x_neg=f"{x_neg_axis:02d}",
-            x_pos=f"{x_pos_axis:02d}",
-            y_neg=f"{y_neg_axis:02d}",
-            y_pos=f"{y_pos_axis:02d}",
-            guid=guid,
-            port=port,
-        )
-
-    controls_patch = {
-        "profile\\default": "false",
-        "profile": "0",
-        "profiles\\size": "1",
-        "profiles\\1\\name\\default": "false",
-        "profiles\\1\\name": "Meridian SDL2",
-        "profiles\\1\\button_a\\default": "false",
-        "profiles\\1\\button_a": f"\"{_citra_digital_expr('a')}\"",
-        "profiles\\1\\button_b\\default": "false",
-        "profiles\\1\\button_b": f"\"{_citra_digital_expr('b')}\"",
-        "profiles\\1\\button_x\\default": "false",
-        "profiles\\1\\button_x": f"\"{_citra_digital_expr('x')}\"",
-        "profiles\\1\\button_y\\default": "false",
-        "profiles\\1\\button_y": f"\"{_citra_digital_expr('y')}\"",
-        "profiles\\1\\button_up\\default": "false",
-        "profiles\\1\\button_up": f"\"{_citra_digital_expr('dp_up')}\"",
-        "profiles\\1\\button_down\\default": "false",
-        "profiles\\1\\button_down": f"\"{_citra_digital_expr('dp_down')}\"",
-        "profiles\\1\\button_left\\default": "false",
-        "profiles\\1\\button_left": f"\"{_citra_digital_expr('dp_left')}\"",
-        "profiles\\1\\button_right\\default": "false",
-        "profiles\\1\\button_right": f"\"{_citra_digital_expr('dp_right')}\"",
-        "profiles\\1\\button_l\\default": "false",
-        "profiles\\1\\button_l": f"\"{_citra_digital_expr('l')}\"",
-        "profiles\\1\\button_r\\default": "false",
-        "profiles\\1\\button_r": f"\"{_citra_digital_expr('r')}\"",
-        "profiles\\1\\button_start\\default": "false",
-        "profiles\\1\\button_start": f"\"{_citra_digital_expr('plus')}\"",
-        "profiles\\1\\button_select\\default": "false",
-        "profiles\\1\\button_select": f"\"{_citra_digital_expr('minus')}\"",
-        "profiles\\1\\button_zl\\default": "false",
-        "profiles\\1\\button_zl": f"\"{_citra_digital_expr('zl')}\"",
-        "profiles\\1\\button_zr\\default": "false",
-        "profiles\\1\\button_zr": f"\"{_citra_digital_expr('zr')}\"",
-        "profiles\\1\\circle_pad\\default": "false",
-        "profiles\\1\\circle_pad": f"\"{_citra_analog_expr('ls_left', 'ls_right', 'ls_up', 'ls_down')}\"",
-        "profiles\\1\\c_stick\\default": "false",
-        "profiles\\1\\c_stick": f"\"{_citra_analog_expr('rs_left', 'rs_right', 'rs_up', 'rs_down')}\"",
-        "profiles\\1\\motion_device\\default": "true",
-        "profiles\\1\\motion_device": "\"engine:motion_emu,update_period:100,sensitivity:0.01,tilt_clamp:90.0\"",
-        "profiles\\1\\touch_device\\default": "true",
-        "profiles\\1\\touch_device": "engine:emu_window",
-        "profiles\\1\\use_touch_from_button\\default": "true",
-        "profiles\\1\\use_touch_from_button": "false",
-        "profiles\\1\\touch_from_button_map\\default": "true",
-        "profiles\\1\\touch_from_button_map": "0",
-        "profiles\\1\\udp_input_address\\default": "true",
-        "profiles\\1\\udp_input_address": "127.0.0.1",
-        "profiles\\1\\udp_input_port\\default": "true",
-        "profiles\\1\\udp_input_port": "26760",
-        "profiles\\1\\udp_pad_index\\default": "true",
-        "profiles\\1\\udp_pad_index": "0",
-    }
-    _patch_ini(qt_ini, {"Controls": controls_patch})
-
+def _setup_citra(ctx: _SetupContext) -> None:
+    """Configure Citra with BIOS files."""
+    sysdata_dir = ctx.exe_path.parent / "user" / "sysdata"
+    sysdata_dir.mkdir(parents=True, exist_ok=True)
+    _copy_bios_to_dir(ctx, sysdata_dir)
 
 # -- RPCS3 -----------------------------------------------------------------
 
 def _setup_rpcs3(ctx: _SetupContext) -> None:
-    """Configure RPCS3 with firmware path and controller."""
+    """Configure RPCS3 with firmware path."""
     dev_flash = ctx.exe_path.parent / "dev_flash"
     dev_flash.mkdir(parents=True, exist_ok=True)
 
@@ -1585,44 +907,6 @@ def _setup_rpcs3(ctx: _SetupContext) -> None:
         except Exception:
             pass
 
-    # RPCS3 stores pad config in config/input_configs/global/Default.yml.
-    # Always overwrite so Meridian stays authoritative for input config.
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        pad_dir = ctx.exe_path.parent / "config" / "input_configs" / "global"
-        pad_dir.mkdir(parents=True, exist_ok=True)
-        pad_path = pad_dir / "Default.yml"
-        pad_path.write_text(textwrap.dedent("""\
-            Player 1 Input:
-              Handler: XInput
-              Device: XInput Pad #0
-              Config:
-                Left Stick Left: LS X-
-                Left Stick Down: LS Y+
-                Left Stick Right: LS X+
-                Left Stick Up: LS Y-
-                Right Stick Left: RS X-
-                Right Stick Down: RS Y+
-                Right Stick Right: RS X+
-                Right Stick Up: RS Y-
-                Start: Start
-                Select: Back
-                PS Button: Guide
-                Square: X
-                Cross: A
-                Circle: B
-                Triangle: Y
-                Left: Left
-                Down: Down
-                Right: Right
-                Up: Up
-                R1: RB
-                R2: RT
-                R3: RS
-                L1: LB
-                L2: LT
-                L3: LS
-        """), encoding="utf-8")
 
 
 # -- xemu ------------------------------------------------------------------
@@ -1682,81 +966,15 @@ def _setup_vita3k(ctx: _SetupContext) -> None:
             pass
 
 
-# -- mGBA ------------------------------------------------------------------
-
-# mGBA-Qt encodes SDL button/axis as high-bit-tagged integers:
-#   Button N → 0x4000_0000 | N
-#   Axis A dir D → 0x8000_0000 | (A << 1) | D   (D: 0 = negative, 1 = positive)
-_MGBA_BTN  = 0x4000_0000
-_MGBA_AXIS = 0x8000_0000
-
-
 def _setup_mgba(ctx: _SetupContext) -> None:
-    """Configure mGBA in portable mode with controller mapping."""
+    """Configure mGBA in portable mode."""
     _ensure_portable(ctx.install_dir, marker="portable.ini")
-
-    qt_ini = ctx.exe_path.parent / "qt.ini"
-    inp = ctx.input_cfg
-    if not inp.is_gamepad:
-        return
-
-    # Build mappings for GBA and GB platforms using Meridian bindings.
-    gba = {
-        "platform.gba.A":      _MGBA_BTN | inp.resolve_button("a"),
-        "platform.gba.B":      _MGBA_BTN | inp.resolve_button("b"),
-        "platform.gba.L":      _MGBA_BTN | inp.resolve_button("l"),
-        "platform.gba.R":      _MGBA_BTN | inp.resolve_button("r"),
-        "platform.gba.Select": _MGBA_BTN | inp.resolve_button("minus"),
-        "platform.gba.Start":  _MGBA_BTN | inp.resolve_button("plus"),
-        "platform.gba.Up":     _MGBA_BTN | inp.resolve_button("dp_up"),
-        "platform.gba.Down":   _MGBA_BTN | inp.resolve_button("dp_down"),
-        "platform.gba.Left":   _MGBA_BTN | inp.resolve_button("dp_left"),
-        "platform.gba.Right":  _MGBA_BTN | inp.resolve_button("dp_right"),
-    }
-    gb = {
-        "platform.gb.A":      gba["platform.gba.A"],
-        "platform.gb.B":      gba["platform.gba.B"],
-        "platform.gb.Select": gba["platform.gba.Select"],
-        "platform.gb.Start":  gba["platform.gba.Start"],
-        "platform.gb.Up":     gba["platform.gba.Up"],
-        "platform.gb.Down":   gba["platform.gba.Down"],
-        "platform.gb.Left":   gba["platform.gba.Left"],
-        "platform.gb.Right":  gba["platform.gba.Right"],
-    }
-    patches: dict[str, dict[str, str]] = {
-        "ports.1": {k: str(v) for k, v in {**gba, **gb}.items()},
-    }
-    _patch_ini(qt_ini, patches)
 
 
 # -- DeSmuME ---------------------------------------------------------------
 
 def _setup_desmume(ctx: _SetupContext) -> None:
-    """Configure DeSmuME with controller button indices."""
-    # DeSmuME stores its config in DeSmuME.ini (DirectInput indices).
-    # For XInput gamepads the DInput button indices match SDL standard.
-    ini_path = ctx.exe_path.parent / "DeSmuME.ini"
-    inp = ctx.input_cfg
-    if not inp.is_gamepad:
-        return
-
-    patches: dict[str, dict[str, str]] = {
-        "Controls": {
-            "Joy_A":      str(inp.resolve_button("a")),
-            "Joy_B":      str(inp.resolve_button("b")),
-            "Joy_X":      str(inp.resolve_button("x")),
-            "Joy_Y":      str(inp.resolve_button("y")),
-            "Joy_L":      str(inp.resolve_button("l")),
-            "Joy_R":      str(inp.resolve_button("r")),
-            "Joy_Select": str(inp.resolve_button("minus")),
-            "Joy_Start":  str(inp.resolve_button("plus")),
-            "Joy_Up":     str(inp.resolve_button("dp_up")),
-            "Joy_Down":   str(inp.resolve_button("dp_down")),
-            "Joy_Left":   str(inp.resolve_button("dp_left")),
-            "Joy_Right":  str(inp.resolve_button("dp_right")),
-        },
-    }
-    _patch_ini(ini_path, patches)
+    """Configure DeSmuME base files only."""
 
 
 # -- Mednafen --------------------------------------------------------------
@@ -1764,10 +982,7 @@ def _setup_desmume(ctx: _SetupContext) -> None:
 def _setup_mednafen(ctx: _SetupContext) -> None:
     """Set up Mednafen base directory structure.
 
-    Mednafen's input config uses per-device GUIDs that are assigned
-    interactively at first run (Alt+Shift+1 in-game).  We set up the
-    directory and ROM path; controller mapping is handled by Mednafen's
-    own auto-configuration or the user's first-run setup.
+    We set up the directory and ROM path only.
     """
     cfg_path = ctx.exe_path.parent / "mednafen.cfg"
     if not cfg_path.exists():
@@ -1798,11 +1013,8 @@ def _setup_mednafen(ctx: _SetupContext) -> None:
 def _setup_fceux(ctx: _SetupContext) -> None:
     """Configure FCEUX for portable use.
 
-    FCEUX on Windows uses DirectInput with device GUIDs, making it
-    difficult to auto-configure input from an external tool.  We set up
-    the base config; the user configures input once through FCEUX's
-    Options > Gamepad dialog.  SDL Game Controller auto-detect handles
-    most recognized gamepads.
+    FCEUX on Windows uses DirectInput with device GUIDs.  We only set up
+    base files and leave input handling to the emulator.
     """
     cfg_path = ctx.exe_path.parent / "fceux.cfg"
     if not cfg_path.exists():
@@ -1810,136 +1022,23 @@ def _setup_fceux(ctx: _SetupContext) -> None:
 
     _copy_bios_to_dir(ctx, ctx.exe_path.parent)
 
-    inp = ctx.input_cfg
-    if inp.is_gamepad:
-        # Write SDL-style gamepad config (used by FCEUX SDL/Qt builds).
-        text = cfg_path.read_text(encoding="utf-8", errors="replace")
-        sdl_keys = {
-            "SDL.Input.GamePad.0.DeviceType": "Gamepad",
-            "SDL.Input.GamePad.0.DeviceNum":  "0",
-            "SDL.Input.GamePad.0.A":          f"g0b{inp.resolve_button('a')}",
-            "SDL.Input.GamePad.0.B":          f"g0b{inp.resolve_button('b')}",
-            "SDL.Input.GamePad.0.Select":     f"g0b{inp.resolve_button('minus')}",
-            "SDL.Input.GamePad.0.Start":      f"g0b{inp.resolve_button('plus')}",
-            "SDL.Input.GamePad.0.Up":         f"g0b{inp.resolve_button('dp_up')}",
-            "SDL.Input.GamePad.0.Down":       f"g0b{inp.resolve_button('dp_down')}",
-            "SDL.Input.GamePad.0.Left":       f"g0b{inp.resolve_button('dp_left')}",
-            "SDL.Input.GamePad.0.Right":      f"g0b{inp.resolve_button('dp_right')}",
-            "SDL.Input.GamePad.0.TurboA":     "",
-            "SDL.Input.GamePad.0.TurboB":     "",
-        }
-        for key, value in sdl_keys.items():
-            pattern = rf'^(\s*{re.escape(key)}\s*=\s*)(.*)$'
-            repl = rf'\g<1>{value}'
-            text, n = re.subn(pattern, repl, text, count=1, flags=re.MULTILINE)
-            if n == 0:
-                text += f"\n{key} = {value}"
-        cfg_path.write_text(text + "\n", encoding="utf-8")
-
 
 # -- Mesen -----------------------------------------------------------------
 
 def _setup_mesen(ctx: _SetupContext) -> None:
-    """Configure Mesen 2 controller mapping via settings.json."""
-    settings_path = ctx.exe_path.parent / "settings.json"
-
-    inp = ctx.input_cfg
-    if not inp.is_gamepad:
-        return
-
-    # Mesen 2 uses SDL scancodes in its JSON config.  Build an input
-    # profile for Player 1 with the user's Meridian bindings.
-    # Mesen uses raw SDL2 button indices prefixed by the device index.
-    mesen_input = {
-        "type": "SnesController",
-        "mapping1": {
-            "a":      f"Pad0 But{inp.resolve_button('a')}",
-            "b":      f"Pad0 But{inp.resolve_button('b')}",
-            "x":      f"Pad0 But{inp.resolve_button('x')}",
-            "y":      f"Pad0 But{inp.resolve_button('y')}",
-            "l":      f"Pad0 But{inp.resolve_button('l')}",
-            "r":      f"Pad0 But{inp.resolve_button('r')}",
-            "select": f"Pad0 But{inp.resolve_button('minus')}",
-            "start":  f"Pad0 But{inp.resolve_button('plus')}",
-            "up":     f"Pad0 But{inp.resolve_button('dp_up')}",
-            "down":   f"Pad0 But{inp.resolve_button('dp_down')}",
-            "left":   f"Pad0 But{inp.resolve_button('dp_left')}",
-            "right":  f"Pad0 But{inp.resolve_button('dp_right')}",
-        },
-    }
-
-    if settings_path.exists():
-        try:
-            data = json.loads(
-                settings_path.read_text(encoding="utf-8")
-            )
-            # Merge input config into the existing settings
-            data.setdefault("input", {})["port1"] = mesen_input
-            settings_path.write_text(
-                json.dumps(data, indent=2), encoding="utf-8",
-            )
-        except Exception:
-            pass
-    else:
-        settings_path.write_text(
-            json.dumps({"input": {"port1": mesen_input}}, indent=2),
-            encoding="utf-8",
-        )
+    """Configure Mesen base files only."""
 
 
 # -- Snes9x ---------------------------------------------------------------
 
 def _setup_snes9x(ctx: _SetupContext) -> None:
-    """Configure Snes9x with controller mapping.
-
-    The Windows GUI version stores joystick mappings in snes9x.conf.
-    We write the config using DirectInput button indices which match
-    SDL standard for XInput gamepads.
-    """
-    conf_path = ctx.exe_path.parent / "snes9x.conf"
-
-    inp = ctx.input_cfg
-    if not inp.is_gamepad:
-        return
-
-    # Snes9x Unix/X11 format: J<dev>:B<n> = Joypad1 <Button>
-    # Maps user's physical buttons to SNES actions (same naming
-    # convention as Meridian — A=east, B=south, X=north, Y=west).
-    mappings = {
-        f"J00:B{inp.resolve_button('a')}":     "Joypad1 A",
-        f"J00:B{inp.resolve_button('b')}":     "Joypad1 B",
-        f"J00:B{inp.resolve_button('x')}":     "Joypad1 X",
-        f"J00:B{inp.resolve_button('y')}":     "Joypad1 Y",
-        f"J00:B{inp.resolve_button('l')}":     "Joypad1 L",
-        f"J00:B{inp.resolve_button('r')}":     "Joypad1 R",
-        f"J00:B{inp.resolve_button('minus')}": "Joypad1 Select",
-        f"J00:B{inp.resolve_button('plus')}":  "Joypad1 Start",
-        "J00:Axis1": "Joypad1 Axis Up/Down T=50%",
-        "J00:Axis0": "Joypad1 Axis Left/Right T=50%",
-    }
-
-    text = conf_path.read_text(encoding="utf-8", errors="replace") if conf_path.exists() else ""
-
-    # Check if there's a controls section; if not, look for one to add to
-    section_marker = "[Unix/X11 Controls]"
-    if section_marker not in text:
-        text = text.rstrip() + f"\n\n{section_marker}\n"
-    for key, value in mappings.items():
-        pattern = rf'^(\s*{re.escape(key)}\s*=\s*)(.*)$'
-        repl = rf'\g<1>{value}'
-        text, n = re.subn(pattern, repl, text, count=1, flags=re.MULTILINE)
-        if n == 0:
-            text += f"\n{key} = {value}"
-    conf_path.write_text(text + "\n", encoding="utf-8")
+    """Configure Snes9x base files only."""
 
 
 # -- SameBoy ---------------------------------------------------------------
 
 def _setup_sameboy(ctx: _SetupContext) -> None:
     """Configure SameBoy for portable use.
-
-    SameBoy uses SDL Game Controller for input and auto-detects
-    recognized gamepads.  No explicit input config is needed.
     """
     _copy_bios_to_dir(ctx, ctx.exe_path.parent)
 
@@ -1948,10 +1047,6 @@ def _setup_sameboy(ctx: _SetupContext) -> None:
 
 def _setup_stella(ctx: _SetupContext) -> None:
     """Configure Stella (Atari 2600) for portable use.
-
-    Stella uses SDL Game Controller which auto-detects most modern
-    gamepads.  We set up the base directory; controller mapping is
-    handled automatically by SDL.
     """
     _copy_bios_to_dir(ctx, ctx.exe_path.parent)
 
@@ -1959,11 +1054,7 @@ def _setup_stella(ctx: _SetupContext) -> None:
 # -- Xenia -----------------------------------------------------------------
 
 def _setup_xenia(ctx: _SetupContext) -> None:
-    """Configure Xenia for portable use.
-
-    Xenia uses XInput natively — Xbox / XInput-compatible controllers
-    work out of the box with no configuration needed.
-    """
+    """Configure Xenia for portable use."""
     portable_toml = ctx.exe_path.parent / "portable.toml"
     if not portable_toml.exists():
         portable_toml.write_text("", encoding="utf-8")
@@ -2009,6 +1100,7 @@ _HANDLERS: dict[str, Any] = {
     "ryubing": _setup_ryubing,
     "ryujinx": _setup_ryubing,
     "eden": _setup_eden,
+    "azahar": _setup_azahar,
     "citra": _setup_citra,
     "rpcs3": _setup_rpcs3,
     "xemu": _setup_xemu,

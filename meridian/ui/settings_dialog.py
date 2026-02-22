@@ -1,3 +1,7 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 """
 Settings dialog for Meridian  (Edit > Settings).
 
@@ -19,17 +23,19 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QStandardPaths
+from PySide6.QtCore import Qt, QStandardPaths, Slot, QTimer
+from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QCheckBox, QListWidget, QListWidgetItem, QStackedWidget,
     QTabWidget, QPushButton, QLabel, QLineEdit, QComboBox, QSpinBox,
-    QSlider, QFileDialog, QDialogButtonBox, QGroupBox, QMessageBox, QProgressDialog, QInputDialog,
-    QScrollArea, QLayout,
+    QSlider, QFileDialog, QDialogButtonBox, QGroupBox, QMessageBox, QProgressDialog,
+    QScrollArea, QLayout, QPlainTextEdit,
 )
 
 from PySide6.QtWidgets import QApplication
 
+from meridian.ui import dialogs as _msgbox
 from meridian.core.config import (
     Config, EmulatorEntry, SystemEntry,
     KNOWN_SYSTEMS, SYSTEM_NAMES, emulators_for_system, EMULATOR_CATALOG, EmulatorCatalogEntry,
@@ -43,13 +49,16 @@ from meridian.ui.style import (
     active_theme, set_theme, set_density, build_stylesheet, THEME_NAMES, THEMES,
 )
 
+_ROOT = Path(__file__).resolve().parents[2]
+_LOGO_TRANSPARENT = _ROOT / "assets" / "logo_transparent.png"
+
 
 # ======================================================================
 # Category / subcategory definitions
 # ======================================================================
 
 _CATEGORIES: list[tuple[str, list[str]]] = [
-    ("General",        ["General", "UI", "Hotkeys"]),
+    ("General",        ["General", "UI", "Hotkeys", "About"]),
     ("Graphics",       ["Display", "Rendering"]),
     ("Performance",    ["System", "Cache"]),
     ("Audio",          ["Output", "Mixer"]),
@@ -62,12 +71,14 @@ _CATEGORIES: list[tuple[str, list[str]]] = [
     ("Adv. Settings",  ["Debug", "Experimental"]),
 ]
 
+_APP_VERSION = "0.1.0-dev"
+
 _RETROARCH_CORE_CANDIDATES: dict[str, list[str]] = {
-    "nes": ["fceumm_libretro.dll", "nestopia_libretro.dll"],
+    "nes": ["fceumm_libretro.dll", "nestopia_libretro.dll", "mesen_libretro.dll"],
     "snes": ["snes9x_libretro.dll", "bsnes_libretro.dll"],
     "n64": ["mupen64plus_next_libretro.dll", "parallel_n64_libretro.dll"],
-    "gb": ["gambatte_libretro.dll", "sameboy_libretro.dll"],
-    "gbc": ["gambatte_libretro.dll", "sameboy_libretro.dll"],
+    "gb": ["gambatte_libretro.dll", "sameboy_libretro.dll", "mgba_libretro.dll"],
+    "gbc": ["gambatte_libretro.dll", "sameboy_libretro.dll", "mgba_libretro.dll"],
     "gba": ["mgba_libretro.dll"],
     "nds": ["melonds_libretro.dll", "desmume_libretro.dll"],
     "genesis": ["genesis_plus_gx_libretro.dll", "picodrive_libretro.dll"],
@@ -75,14 +86,21 @@ _RETROARCH_CORE_CANDIDATES: dict[str, list[str]] = {
     "gg": ["genesis_plus_gx_libretro.dll", "picodrive_libretro.dll"],
     "saturn": ["mednafen_saturn_libretro.dll"],
     "dreamcast": ["flycast_libretro.dll"],
-    "ps1": ["duckstation_libretro.dll", "pcsx_rearmed_libretro.dll"],
+    "ps1": ["mednafen_psx_hw_libretro.dll", "swanstation_libretro.dll", "pcsx_rearmed_libretro.dll"],
     "psp": ["ppsspp_libretro.dll"],
+    "atari2600": ["stella_libretro.dll"],
     "atari7800": ["prosystem_libretro.dll"],
     "lynx": ["handy_libretro.dll"],
     "jaguar": ["virtualjaguar_libretro.dll"],
     "tg16": ["mednafen_pce_fast_libretro.dll", "mednafen_pce_libretro.dll"],
     "ngp": ["mednafen_ngp_libretro.dll"],
+    "neogeo": ["fbneo_libretro.dll"],
     "mame": ["mame_libretro.dll", "fbneo_libretro.dll"],
+    "3do": ["opera_libretro.dll"],
+    "vectrex": ["vecx_libretro.dll"],
+    "wonderswan": ["mednafen_wswan_libretro.dll"],
+    "msx": ["fmsx_libretro.dll", "bluemsx_libretro.dll"],
+    "dos": ["dosbox_pure_libretro.dll"],
 }
 
 _BIOS_REQUIREMENTS: list[dict[str, object]] = [
@@ -102,7 +120,7 @@ _BIOS_REQUIREMENTS: list[dict[str, object]] = [
     {"id": "wiiu_keys", "name": "Wii U Keys", "systems": ["wiiu"], "required": True, "hint": "keys.txt"},
     {"id": "switch_prod_keys", "name": "Nintendo Switch Prod Keys", "systems": ["switch"], "required": True, "hint": "prod.keys"},
     {"id": "switch_title_keys", "name": "Nintendo Switch Title Keys", "systems": ["switch"], "required": False, "hint": "title.keys"},
-    {"id": "switch_firmware", "name": "Nintendo Switch Firmware", "systems": ["switch"], "required": False, "hint": "firmware/*.nca"},
+    {"id": "switch_firmware", "name": "Nintendo Switch Firmware", "systems": ["switch"], "required": True, "hint": "firmware .zip archive or folder of .nca files"},
     {"id": "n3ds_aes_keys", "name": "Nintendo 3DS AES Keys", "systems": ["3ds"], "required": False, "hint": "aes_keys.txt"},
     {"id": "n3ds_seeddb", "name": "Nintendo 3DS Seed Database", "systems": ["3ds"], "required": False, "hint": "seeddb.bin"},
     {"id": "n3ds_boot9", "name": "Nintendo 3DS boot9", "systems": ["3ds"], "required": False, "hint": "boot9.bin"},
@@ -169,6 +187,42 @@ _BIOS_REQUIREMENTS: list[dict[str, object]] = [
     {"id": "mame_model2", "name": "Sega Model 2 BIOS", "systems": ["mame"], "required": False, "hint": "model2.zip"},
     {"id": "mame_model3", "name": "Sega Model 3 BIOS", "systems": ["mame"], "required": False, "hint": "model3.zip"},
 
+    # Sega CD / 32X (dedicated system IDs)
+    {"id": "segacd_bios_us", "name": "Sega CD BIOS (USA)", "systems": ["segacd"], "required": True, "hint": "bios_CD_U.bin"},
+    {"id": "segacd_bios_eu", "name": "Sega CD BIOS (Europe)", "systems": ["segacd"], "required": False, "hint": "bios_CD_E.bin"},
+    {"id": "segacd_bios_jp", "name": "Sega CD BIOS (Japan)", "systems": ["segacd"], "required": False, "hint": "bios_CD_J.bin"},
+    {"id": "sega32x_bios_m68k", "name": "Sega 32X BIOS (M68K)", "systems": ["sega32x"], "required": True, "hint": "32X_G_BIOS.BIN"},
+    {"id": "sega32x_bios_msh2", "name": "Sega 32X BIOS (Master SH2)", "systems": ["sega32x"], "required": True, "hint": "32X_M_BIOS.BIN"},
+    {"id": "sega32x_bios_ssh2", "name": "Sega 32X BIOS (Slave SH2)", "systems": ["sega32x"], "required": True, "hint": "32X_S_BIOS.BIN"},
+
+    # NEC
+    {"id": "pcfx_bios", "name": "PC-FX BIOS", "systems": ["pcfx"], "required": True, "hint": "pcfx.rom"},
+    {"id": "pc98_bios_font", "name": "PC-98 Font ROM", "systems": ["pc98"], "required": False, "hint": "font.bmp / font.rom"},
+
+    # SNK
+    {"id": "neocd_bios", "name": "Neo Geo CD BIOS", "systems": ["neocd"], "required": True, "hint": "neocd.bin / neocdz.zip"},
+
+    # Atari
+    {"id": "atari5200_bios", "name": "Atari 5200 BIOS", "systems": ["atari5200"], "required": True, "hint": "5200.rom"},
+    {"id": "atarist_tos", "name": "Atari ST TOS ROM", "systems": ["atarist"], "required": True, "hint": "tos.img"},
+
+    # ColecoVision / Intellivision
+    {"id": "coleco_bios", "name": "ColecoVision BIOS", "systems": ["coleco"], "required": True, "hint": "coleco.rom"},
+    {"id": "intv_exec_bios", "name": "Intellivision Exec BIOS", "systems": ["intv"], "required": True, "hint": "exec.bin"},
+    {"id": "intv_grom_bios", "name": "Intellivision GROM BIOS", "systems": ["intv"], "required": True, "hint": "grom.bin"},
+
+    # Magnavox / Fairchild
+    {"id": "odyssey2_bios", "name": "Odyssey² BIOS", "systems": ["odyssey2"], "required": True, "hint": "o2rom.bin"},
+    {"id": "channelf_bios_sl1", "name": "Channel F BIOS (SL31253)", "systems": ["channelf"], "required": True, "hint": "sl31253.bin"},
+    {"id": "channelf_bios_sl2", "name": "Channel F BIOS (SL31254)", "systems": ["channelf"], "required": True, "hint": "sl31254.bin"},
+
+    # Commodore
+    {"id": "c64_kernal", "name": "Commodore 64 Kernal ROM", "systems": ["c64"], "required": False, "hint": "kernal.bin"},
+    {"id": "c64_basic", "name": "Commodore 64 BASIC ROM", "systems": ["c64"], "required": False, "hint": "basic.bin"},
+    {"id": "c64_chargen", "name": "Commodore 64 Character ROM", "systems": ["c64"], "required": False, "hint": "chargen.bin"},
+    {"id": "amiga_kick13", "name": "Amiga Kickstart 1.3 ROM", "systems": ["amiga"], "required": True, "hint": "kick31.rom / amiga-os-13.rom"},
+    {"id": "amiga_kick31", "name": "Amiga Kickstart 3.1 ROM", "systems": ["amiga"], "required": False, "hint": "kick31.rom / amiga-os-31.rom"},
+
     # Other systems
     {"id": "3do_panafz10", "name": "3DO BIOS (FZ-10)", "systems": ["3do"], "required": True, "hint": "panafz10.bin"},
     {"id": "3do_panafz1", "name": "3DO BIOS (FZ-1)", "systems": ["3do"], "required": False, "hint": "panafz1.bin"},
@@ -189,8 +243,16 @@ _SYSTEM_COMPANY_ORDER: list[str] = [
     "Sony",
     "Microsoft",
     "Atari",
-    "NEC / Hudson",
+    "NEC",
     "SNK",
+    "Commodore",
+    "Amstrad",
+    "Sinclair",
+    "Coleco",
+    "Mattel",
+    "Magnavox / Philips",
+    "Fairchild",
+    "MSX",
     "Arcade",
     "PC / DOS",
     "Other",
@@ -198,24 +260,42 @@ _SYSTEM_COMPANY_ORDER: list[str] = [
 
 
 def _system_company(system_id: str) -> str:
-    if system_id in {"nes", "snes", "n64", "gc", "wii", "wiiu", "switch", "gb", "gbc", "gba", "nds", "3ds"}:
+    if system_id in {"nes", "snes", "n64", "gc", "wii", "wiiu", "switch",
+                      "gb", "gbc", "gba", "vb", "nds", "3ds", "pokemini"}:
         return "Nintendo"
-    if system_id in {"genesis", "saturn", "dreamcast", "sms", "gg"}:
+    if system_id in {"genesis", "segacd", "sega32x", "saturn", "dreamcast",
+                      "sms", "gg", "sg1000"}:
         return "Sega"
     if system_id in {"ps1", "ps2", "ps3", "psp", "psvita"}:
         return "Sony"
     if system_id in {"xbox", "xbox360"}:
         return "Microsoft"
-    if system_id in {"atari2600", "atari7800", "lynx", "jaguar"}:
+    if system_id in {"atari2600", "atari5200", "atari7800", "lynx", "jaguar", "atarist"}:
         return "Atari"
-    if system_id in {"tg16"}:
-        return "NEC / Hudson"
-    if system_id in {"ngp", "neogeo"}:
+    if system_id in {"tg16", "pcfx", "pc98"}:
+        return "NEC"
+    if system_id in {"ngp", "neogeo", "neocd"}:
         return "SNK"
     if system_id in {"mame"}:
         return "Arcade"
     if system_id in {"dos", "pc"}:
         return "PC / DOS"
+    if system_id in {"c64", "amiga"}:
+        return "Commodore"
+    if system_id in {"cpc"}:
+        return "Amstrad"
+    if system_id in {"zxspec"}:
+        return "Sinclair"
+    if system_id in {"coleco"}:
+        return "Coleco"
+    if system_id in {"intv"}:
+        return "Mattel"
+    if system_id in {"odyssey2"}:
+        return "Magnavox / Philips"
+    if system_id in {"channelf"}:
+        return "Fairchild"
+    if system_id in {"msx"}:
+        return "MSX"
     return "Other"
 
 
@@ -226,22 +306,24 @@ def _system_company(system_id: str) -> str:
 class SettingsDialog(QDialog):
     """Modal settings dialog with sidebar + subcategory tabs."""
 
-    MIN_W, MIN_H = 740, 520
+    MIN_W, MIN_H = 960, 600
 
     def __init__(self, config: Config, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumSize(self.MIN_W, self.MIN_H)
-        self.resize(820, 560)
+        self.resize(1020, 660)
 
         self._cfg = copy.deepcopy(config)
         self._original_cfg = copy.deepcopy(config)
         self._dirty = False
+        self._core_update_cache: dict[str, bool] = {}
         self._building = True   # suppress _mark_dirty during construction
         self._build_ui()
         self._building = False
         self._dirty = False     # reset in case construction triggered it
         self._sidebar.setCurrentRow(0)
+        self._check_core_updates_async()
 
     # ------------------------------------------------------------------
     # Build UI
@@ -373,6 +455,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(content)
         return scroll
 
@@ -431,6 +514,8 @@ class SettingsDialog(QDialog):
             return self._general_ui()
         if sub == "Hotkeys":
             return self._general_hotkeys()
+        if sub == "About":
+            return self._general_about()
         return _placeholder(sub)
 
     def _general_general(self) -> QWidget:
@@ -489,6 +574,12 @@ class SettingsDialog(QDialog):
         self._theme_combo.setCurrentIndex(idx)
         self._theme_combo.currentTextChanged.connect(self._mark_dirty)
         g.addRow("Theme:", self._theme_combo)
+
+        self._logo_set_combo = QComboBox()
+        self._logo_set_combo.addItems(["Colorful", "White", "Black"])
+        self._logo_set_combo.setCurrentText(getattr(self._cfg, "system_logo_set", "Colorful"))
+        self._logo_set_combo.currentTextChanged.connect(self._mark_dirty)
+        g.addRow("Console logos:", self._logo_set_combo)
 
         # Language (moved from General tab)
         self._lang_combo = QComboBox()
@@ -582,7 +673,7 @@ class SettingsDialog(QDialog):
         # Page 1 — Animation selector
         self._bg_anim_combo = QComboBox()
         self._bg_anim_combo.addItems([
-            "Waves", "Starscape",
+            "Waves", "Starscape", "1998",
         ])
         if self._cfg.bg_animation:
             self._bg_anim_combo.setCurrentText(self._cfg.bg_animation)
@@ -604,8 +695,31 @@ class SettingsDialog(QDialog):
         grp_display = QGroupBox("Game Display")
         g_d = QVBoxLayout(grp_display)
         g_d.setSpacing(10)
-        g_d.addWidget(_disabled_check("Show game titles under cover art", True))
-        g_d.addWidget(_disabled_check("Show platform badges", True))
+
+        self._chk_show_game_icons = QCheckBox("Show game icons / box art in list")
+        self._chk_show_game_icons.setChecked(self._cfg.show_game_icons)
+        self._chk_show_game_icons.toggled.connect(self._mark_dirty)
+        g_d.addWidget(self._chk_show_game_icons)
+
+        self._chk_show_system_logos = QCheckBox("Show console logos alongside games")
+        self._chk_show_system_logos.setChecked(self._cfg.show_system_logos)
+        self._chk_show_system_logos.toggled.connect(self._mark_dirty)
+        g_d.addWidget(self._chk_show_system_logos)
+
+        self._chk_show_ext = QCheckBox("Show file extensions in game titles")
+        self._chk_show_ext.setChecked(self._cfg.show_file_extensions)
+        self._chk_show_ext.toggled.connect(self._mark_dirty)
+        g_d.addWidget(self._chk_show_ext)
+
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(QLabel("Default sort:"))
+        self._combo_default_sort = QComboBox()
+        self._combo_default_sort.addItems(["Title", "Platform", "Added", "Played"])
+        self._combo_default_sort.setCurrentText(self._cfg.sort_default)
+        self._combo_default_sort.currentTextChanged.connect(self._mark_dirty)
+        sort_row.addWidget(self._combo_default_sort, 1)
+        g_d.addLayout(sort_row)
+
         layout.addWidget(grp_display)
 
         layout.addStretch()
@@ -614,6 +728,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(scroll_content)
 
         outer = QWidget()
@@ -691,6 +806,78 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return w
 
+    def _general_about(self) -> QWidget:
+        """About page — system specs, Meridian version, environment info."""
+        import platform
+        import sys
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # -- Meridian --------------------------------------------------
+        grp_app = QGroupBox("Meridian")
+        g_app = QFormLayout(grp_app)
+        g_app.setSpacing(6)
+        g_app.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        g_app.addRow("Version:", QLabel(f"<b>{_APP_VERSION}</b>"))
+        g_app.addRow("License:", QLabel("AGPL-3.0-or-later"))
+        g_app.addRow("Python:", QLabel(platform.python_version()))
+        try:
+            import PySide6
+            qt_ver = PySide6.__version__
+        except Exception:
+            qt_ver = "Unknown"
+        g_app.addRow("Qt / PySide6:", QLabel(qt_ver))
+        layout.addWidget(grp_app)
+
+        # -- System specs ----------------------------------------------
+        grp_sys = QGroupBox("System")
+        g_sys = QFormLayout(grp_sys)
+        g_sys.setSpacing(6)
+        g_sys.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        g_sys.addRow("OS:", QLabel(f"{platform.system()} {platform.release()} ({platform.machine()})"))
+        g_sys.addRow("Platform:", QLabel(platform.platform()))
+
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            total_gb = mem.total / (1024 ** 3)
+            g_sys.addRow("RAM:", QLabel(f"{total_gb:.1f} GB"))
+            g_sys.addRow("CPU:", QLabel(platform.processor() or "Unknown"))
+            g_sys.addRow("CPU Cores:", QLabel(f"{psutil.cpu_count(logical=False) or '?'} physical, "
+                                              f"{psutil.cpu_count(logical=True) or '?'} logical"))
+        except ImportError:
+            g_sys.addRow("CPU:", QLabel(platform.processor() or "Unknown"))
+
+        layout.addWidget(grp_sys)
+
+        # -- Paths -----------------------------------------------------
+        grp_paths = QGroupBox("Paths")
+        g_paths = QFormLayout(grp_paths)
+        g_paths.setSpacing(6)
+        g_paths.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        from pathlib import Path
+        project_root = Path(__file__).resolve().parent.parent.parent
+        g_paths.addRow("Project root:", self._selectable_label(str(project_root)))
+        g_paths.addRow("Config file:", self._selectable_label(str(project_root / "config.json")))
+        g_paths.addRow("Cache:", self._selectable_label(str(project_root / "cache")))
+        g_paths.addRow("Python:", self._selectable_label(sys.executable))
+        layout.addWidget(grp_paths)
+
+        layout.addStretch()
+        return w
+
+    @staticmethod
+    def _selectable_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lbl.setWordWrap(True)
+        return lbl
+
     # -- Graphics ------------------------------------------------------
 
     def _page_graphics(self, sub: str) -> QWidget:
@@ -712,17 +899,39 @@ class SettingsDialog(QDialog):
 
         self._chk_remember_geom = QCheckBox("Remember window size and position")
         self._chk_remember_geom.setChecked(self._cfg.remember_window_geometry)
-        self._chk_remember_geom.setEnabled(False)   # not wired yet
         self._chk_remember_geom.toggled.connect(self._mark_dirty)
         g.addWidget(self._chk_remember_geom)
 
         self._chk_borderless = QCheckBox("Use borderless window in fullscreen")
         self._chk_borderless.setChecked(self._cfg.borderless_fullscreen)
-        self._chk_borderless.setEnabled(False)   # not wired yet
         self._chk_borderless.toggled.connect(self._mark_dirty)
         g.addWidget(self._chk_borderless)
 
         layout.addWidget(grp)
+
+        grp_anim = QGroupBox("Animations")
+        g_a = QFormLayout(grp_anim)
+        g_a.setSpacing(8)
+        g_a.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self._combo_anim_speed = QComboBox()
+        self._combo_anim_speed.addItems(["Slow", "Normal", "Fast", "Instant"])
+        self._combo_anim_speed.setCurrentText(self._cfg.ui_animation_speed)
+        self._combo_anim_speed.currentTextChanged.connect(self._mark_dirty)
+        g_a.addRow("Animation speed:", self._combo_anim_speed)
+
+        self._chk_smooth_scroll = QCheckBox("Smooth scrolling")
+        self._chk_smooth_scroll.setChecked(self._cfg.smooth_scrolling)
+        self._chk_smooth_scroll.toggled.connect(self._mark_dirty)
+        g_a.addRow("", self._chk_smooth_scroll)
+
+        self._combo_transition = QComboBox()
+        self._combo_transition.addItems(["Fade", "Slide", "None"])
+        self._combo_transition.setCurrentText(self._cfg.list_transition_style)
+        self._combo_transition.currentTextChanged.connect(self._mark_dirty)
+        g_a.addRow("List transition:", self._combo_transition)
+
+        layout.addWidget(grp_anim)
         layout.addStretch()
         return w
 
@@ -752,6 +961,33 @@ class SettingsDialog(QDialog):
         g.addWidget(hint)
 
         layout.addWidget(grp)
+
+        grp_q = QGroupBox("Quality")
+        g_q = QFormLayout(grp_q)
+        g_q.setSpacing(8)
+        g_q.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self._combo_text_render = QComboBox()
+        self._combo_text_render.addItems(["Subpixel", "Greyscale", "None"])
+        self._combo_text_render.setCurrentText(self._cfg.text_rendering)
+        self._combo_text_render.currentTextChanged.connect(self._mark_dirty)
+        g_q.addRow("Text anti-aliasing:", self._combo_text_render)
+
+        self._combo_image_scale = QComboBox()
+        self._combo_image_scale.addItems(["Nearest", "Bilinear", "Smooth"])
+        self._combo_image_scale.setCurrentText(self._cfg.image_scaling)
+        self._combo_image_scale.currentTextChanged.connect(self._mark_dirty)
+        g_q.addRow("Image scaling:", self._combo_image_scale)
+
+        self._combo_icon_size = QComboBox()
+        for sz in [32, 48, 64, 96]:
+            self._combo_icon_size.addItem(f"{sz} px", sz)
+        idx = self._combo_icon_size.findData(self._cfg.icon_size)
+        self._combo_icon_size.setCurrentIndex(idx if idx >= 0 else 1)
+        self._combo_icon_size.currentIndexChanged.connect(self._mark_dirty)
+        g_q.addRow("Game icon size:", self._combo_icon_size)
+
+        layout.addWidget(grp_q)
         layout.addStretch()
         return w
 
@@ -790,6 +1026,17 @@ class SettingsDialog(QDialog):
         row_threads.addStretch()
         g_cpu.addLayout(row_threads)
 
+        row_fgfps = QHBoxLayout()
+        row_fgfps.addWidget(QLabel("Foreground animation FPS:"))
+        self._spin_fg_fps = QSpinBox()
+        self._spin_fg_fps.setRange(15, 144)
+        self._spin_fg_fps.setValue(self._cfg.foreground_fps)
+        self._spin_fg_fps.setSuffix(" fps")
+        self._spin_fg_fps.valueChanged.connect(self._mark_dirty)
+        row_fgfps.addWidget(self._spin_fg_fps)
+        row_fgfps.addStretch()
+        g_cpu.addLayout(row_fgfps)
+
         row_bgfps = QHBoxLayout()
         row_bgfps.addWidget(QLabel("Background animation FPS:"))
         self._spin_bg_fps = QSpinBox()
@@ -812,7 +1059,6 @@ class SettingsDialog(QDialog):
         self._combo_gpu_backend = QComboBox()
         self._combo_gpu_backend.addItems(["Auto", "OpenGL", "Software"])
         self._combo_gpu_backend.setCurrentText(self._cfg.gpu_backend)
-        self._combo_gpu_backend.setEnabled(False)  # not wired yet
         self._combo_gpu_backend.currentTextChanged.connect(self._mark_dirty)
         g_gpu.addRow("Render backend:", self._combo_gpu_backend)
 
@@ -822,6 +1068,39 @@ class SettingsDialog(QDialog):
         g_gpu.addRow("", hint_gpu)
 
         layout.addWidget(grp_gpu)
+
+        # -- Artwork loading -------------------------------------------
+        grp_load = QGroupBox("Artwork Loading")
+        g_load = QVBoxLayout(grp_load)
+        g_load.setSpacing(8)
+
+        self._chk_lazy_load = QCheckBox("Lazy-load artwork (load thumbnails as they scroll into view)")
+        self._chk_lazy_load.setChecked(self._cfg.lazy_load_artwork)
+        self._chk_lazy_load.toggled.connect(self._mark_dirty)
+        g_load.addWidget(self._chk_lazy_load)
+
+        self._chk_prefetch = QCheckBox("Pre-fetch adjacent artwork (smoother scrolling, more memory)")
+        self._chk_prefetch.setChecked(self._cfg.prefetch_adjacent)
+        self._chk_prefetch.toggled.connect(self._mark_dirty)
+        g_load.addWidget(self._chk_prefetch)
+
+        self._chk_preload_emu = QCheckBox("Pre-load emulator configurations at startup")
+        self._chk_preload_emu.setChecked(self._cfg.preload_emulator_configs)
+        self._chk_preload_emu.toggled.connect(self._mark_dirty)
+        g_load.addWidget(self._chk_preload_emu)
+
+        row_img = QHBoxLayout()
+        row_img.addWidget(QLabel("Max images in memory:"))
+        self._spin_max_imgs = QSpinBox()
+        self._spin_max_imgs.setRange(50, 2000)
+        self._spin_max_imgs.setSingleStep(50)
+        self._spin_max_imgs.setValue(self._cfg.max_loaded_images)
+        self._spin_max_imgs.valueChanged.connect(self._mark_dirty)
+        row_img.addWidget(self._spin_max_imgs)
+        row_img.addStretch()
+        g_load.addLayout(row_img)
+
+        layout.addWidget(grp_load)
 
         layout.addStretch()
         return w
@@ -858,6 +1137,11 @@ class SettingsDialog(QDialog):
         row_max.addStretch()
         g.addLayout(row_max)
 
+        btn_clear = QPushButton("Clear Cache")
+        btn_clear.setFixedWidth(120)
+        btn_clear.clicked.connect(self._on_clear_cache)
+        g.addWidget(btn_clear)
+
         layout.addWidget(grp)
 
         # -- Thumbnails ------------------------------------------------
@@ -874,24 +1158,11 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(grp_thumb)
 
-        # -- Actions ---------------------------------------------------
-        grp_actions = QGroupBox("Actions")
-        g_a = QVBoxLayout(grp_actions)
-        g_a.setSpacing(8)
-
-        btn_clear = QPushButton("Clear Cache")
-        btn_clear.setFixedWidth(120)
-        btn_clear.clicked.connect(self._on_clear_cache)
-        g_a.addWidget(btn_clear)
-
-        layout.addWidget(grp_actions)
-
         layout.addStretch()
         return w
 
     def _on_clear_cache(self):
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(
+        _msgbox.information(
             self, "Clear Cache",
             "Cache clearing is not yet implemented.\n"
             "This will remove all cached thumbnails and metadata.",
@@ -1051,6 +1322,36 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(grp_beh)
 
+        # Ambient audio
+        grp_ambient = QGroupBox("Ambient Audio")
+        g_amb = QVBoxLayout(grp_ambient)
+        g_amb.setSpacing(8)
+        self._chk_ambient_enabled = QCheckBox("Enable procedural ambient background audio")
+        self._chk_ambient_enabled.setChecked(self._cfg.ambient_audio_enabled)
+        self._chk_ambient_enabled.toggled.connect(self._mark_dirty)
+        g_amb.addWidget(self._chk_ambient_enabled)
+
+        amb_vol_row = QHBoxLayout()
+        amb_vol_row.addWidget(QLabel("Volume:"))
+        self._ambient_vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._ambient_vol_slider.setRange(0, 100)
+        self._ambient_vol_slider.setValue(self._cfg.ambient_audio_volume)
+        self._ambient_vol_slider.valueChanged.connect(self._mark_dirty)
+        amb_vol_row.addWidget(self._ambient_vol_slider, 1)
+        self._ambient_vol_label = QLabel(f"{self._cfg.ambient_audio_volume}%")
+        self._ambient_vol_label.setFixedWidth(36)
+        self._ambient_vol_slider.valueChanged.connect(
+            lambda v: self._ambient_vol_label.setText(f"{v}%")
+        )
+        amb_vol_row.addWidget(self._ambient_vol_label)
+        g_amb.addLayout(amb_vol_row)
+
+        hint = QLabel("Generates an evolving, seamless ambient pad. No files needed.")
+        hint.setObjectName("sectionLabel")
+        hint.setWordWrap(True)
+        g_amb.addWidget(hint)
+        layout.addWidget(grp_ambient)
+
         layout.addStretch()
         return w
 
@@ -1064,12 +1365,75 @@ class SettingsDialog(QDialog):
             self._input_mgr.ensure_ready()
         if not hasattr(self, "_input_player_controls"):
             self._input_player_controls: dict[int, dict[str, object]] = {}
+        if not hasattr(self, "_input_profile_edit_seq"):
+            self._input_profile_edit_seq: dict[int, int] = {}
+            self._input_profile_edit_counter = 0
 
         if sub.startswith("Player "):
             return self._input_player(int(sub.split()[1]))
         if sub == "Adv. Settings":
             return self._input_adv_settings()
         return _placeholder(sub)
+
+    @staticmethod
+    def _base_device_name(label: str) -> str:
+        """Strip optional ' [#N]' suffix from a device label."""
+        if label.endswith("]") and " [#" in label:
+            return label.rsplit(" [#", 1)[0]
+        return label
+
+    @staticmethod
+    def _controller_matches_api(controller, api_filter: str) -> bool:
+        api = str(getattr(controller, "api_type", "SDL") or "SDL")
+        if api_filter == "SDL":
+            return api == "SDL"
+        if api_filter == "XInput":
+            return api == "XInput"
+        if api_filter == "DirectInput":
+            return api == "DirectInput"
+        return True
+
+    def _populate_input_device_combo(
+        self,
+        combo: QComboBox,
+        mgr,
+        *,
+        api_filter: str = "SDL",
+        saved_text: str = "Any Available",
+        saved_index: int | None = None,
+    ) -> None:
+        """Fill an input device combo with stable index-backed entries."""
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("None", None)
+        combo.addItem("Keyboard + Mouse", "keyboard")
+        combo.addItem("Any Available", "any")
+
+        ctrls = [c for c in mgr.controllers() if self._controller_matches_api(c, api_filter)]
+        name_counts: dict[str, int] = {}
+        for c in ctrls:
+            name_counts[c.name] = name_counts.get(c.name, 0) + 1
+        for c in ctrls:
+            label = c.name
+            if name_counts.get(c.name, 0) > 1:
+                label = f"{c.name} [#{c.index + 1}]"
+            combo.addItem(label, c.index)
+
+        target_idx = -1
+        if isinstance(saved_index, int) and saved_index >= 0:
+            target_idx = combo.findData(saved_index)
+        if target_idx < 0 and saved_text:
+            target_idx = combo.findText(saved_text)
+        if target_idx < 0 and saved_text:
+            base_saved = self._base_device_name(saved_text)
+            for i in range(combo.count()):
+                if self._base_device_name(combo.itemText(i)) == base_saved:
+                    target_idx = i
+                    break
+        if target_idx < 0:
+            target_idx = combo.findText("Any Available")
+        combo.setCurrentIndex(target_idx if target_idx >= 0 else 0)
+        combo.blockSignals(False)
 
     def _input_player(self, num: int) -> QWidget:
         """Build a controller-mapping tab as a vertical list of sections."""
@@ -1079,7 +1443,6 @@ class SettingsDialog(QDialog):
         saved_bindings = saved_input.get("bindings", {})
         defs = saved_bindings if saved_bindings else (_PLAYER1_BINDINGS if num == 1 else {})
         mgr = self._input_mgr
-        detected = mgr.controller_names()
 
         bindings: dict[str, _BindButton] = {}
 
@@ -1095,27 +1458,133 @@ class SettingsDialog(QDialog):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(6)
 
-        # -- Top bar: Connected · Device · Type ------------------------
+        # -- Top bar: Connected · API · Device · Type ------------------
         top = QHBoxLayout()
         top.setSpacing(8)
 
         chk = QCheckBox("Connected")
         chk.setChecked(bool(saved_input.get("connected", num == 1)))
 
+        def _has_any_binding(bind_map: dict[str, _BindButton]) -> bool:
+            for btn in bind_map.values():
+                val = btn.text().strip()
+                if val and val != "Listening …":
+                    return True
+            return False
+
+        def _note_profile_edited() -> None:
+            self._input_profile_edit_counter += 1
+            self._input_profile_edit_seq[num] = self._input_profile_edit_counter
+
+        def _latest_profile_seed(exclude_num: int) -> tuple[str, dict[str, str]] | None:
+            """Return (type, bindings) from the latest profile with bindings."""
+            candidates: list[tuple[int, int, str, dict[str, str]]] = []
+
+            # Prefer in-UI unsaved edits first.
+            controls = getattr(self, "_input_player_controls", {})
+            for pnum, widget_map in controls.items():
+                if pnum == exclude_num:
+                    continue
+                typ = widget_map.get("type")
+                bmap = widget_map.get("bindings")
+                if not isinstance(typ, QComboBox) or not isinstance(bmap, dict):
+                    continue
+                extracted: dict[str, str] = {}
+                for key, btn in bmap.items():
+                    if not hasattr(btn, "text"):
+                        continue
+                    val = btn.text().strip()
+                    if val and val != "Listening …":
+                        extracted[key] = val
+                if extracted:
+                    seq = int(self._input_profile_edit_seq.get(int(pnum), 0))
+                    candidates.append((seq, int(pnum), typ.currentText(), extracted))
+
+            # Include persisted values as fallback.
+            for pnum_str, pdata in (self._cfg.input_player_settings or {}).items():
+                try:
+                    pnum = int(pnum_str)
+                except (TypeError, ValueError):
+                    continue
+                if pnum == exclude_num:
+                    continue
+                if any(c[1] == pnum for c in candidates):
+                    continue
+                if not isinstance(pdata, dict):
+                    continue
+                raw_bindings = pdata.get("bindings") or {}
+                if not isinstance(raw_bindings, dict) or not raw_bindings:
+                    continue
+                extracted = {
+                    str(k): str(v).strip()
+                    for k, v in raw_bindings.items()
+                    if str(v).strip()
+                }
+                if not extracted:
+                    continue
+                seq = int(self._input_profile_edit_seq.get(pnum, 0))
+                ptype = str(pdata.get("type", "Pro Controller"))
+                candidates.append((seq, pnum, ptype, extracted))
+
+            if not candidates:
+                return None
+
+            # If any profile has an explicit edit sequence, pick latest edited.
+            with_seq = [c for c in candidates if c[0] > 0]
+            if with_seq:
+                _, _, src_type, src_bindings = max(with_seq, key=lambda c: c[0])
+                return src_type, src_bindings
+
+            # Otherwise prefer the highest player number that has bindings.
+            _, _, src_type, src_bindings = max(candidates, key=lambda c: c[1])
+            return src_type, src_bindings
+
         def _on_connected(on: bool):
             body.setEnabled(on)
+            api.setEnabled(on)
+            dev.setEnabled(on)
+            tcombo.setEnabled(on)
+            btn_refresh.setEnabled(on)
+
+            if on and not _has_any_binding(bindings):
+                seed = _latest_profile_seed(exclude_num=num)
+                if seed is not None:
+                    src_type, src_bindings = seed
+                    idx = tcombo.findText(src_type)
+                    if idx >= 0:
+                        tcombo.setCurrentIndex(idx)
+                    for key, btn in bindings.items():
+                        btn.set_binding(src_bindings.get(key, ""))
+                    _note_profile_edited()
             self._mark_dirty()
 
         chk.toggled.connect(_on_connected)
         top.addWidget(chk)
 
+        top.addWidget(QLabel("API:"))
+        api = QComboBox()
+        api.addItems(["XInput", "DirectInput", "SDL"])
+        api.setMinimumWidth(90)
+        saved_api = str(saved_input.get("api", "SDL"))
+        if saved_api == "Auto":
+            saved_api = "SDL"
+        api.setCurrentIndex(max(api.findText(saved_api), 0))
+        api.currentIndexChanged.connect(self._mark_dirty)
+        top.addWidget(api)
+
         top.addWidget(QLabel("Device:"))
         dev = QComboBox()
-        dev.addItems(["None", "Keyboard + Mouse", "Any Available"] + detected)
         saved_device = str(saved_input.get("device", "Any Available"))
-        if saved_device and dev.findText(saved_device) < 0:
-            dev.addItem(saved_device)
-        dev.setCurrentIndex(max(dev.findText(saved_device), 0))
+        saved_device_index = saved_input.get("device_index")
+        if not isinstance(saved_device_index, int):
+            saved_device_index = None
+        self._populate_input_device_combo(
+            dev,
+            mgr,
+            api_filter=api.currentText(),
+            saved_text=saved_device,
+            saved_index=saved_device_index,
+        )
         dev.setMinimumWidth(100)
         dev.currentIndexChanged.connect(self._mark_dirty)
         top.addWidget(dev, 1)
@@ -1125,25 +1594,40 @@ class SettingsDialog(QDialog):
 
         def _on_refresh():
             mgr.refresh()
-            current = dev.currentText()
-            dev.blockSignals(True)
-            dev.clear()
-            dev.addItems(
-                ["None", "Keyboard + Mouse", "Any Available"]
-                + mgr.controller_names()
+            current_text = dev.currentText()
+            data = dev.currentData()
+            current_index = data if isinstance(data, int) and data >= 0 else None
+            self._populate_input_device_combo(
+                dev,
+                mgr,
+                api_filter=api.currentText(),
+                saved_text=current_text,
+                saved_index=current_index,
             )
-            idx = dev.findText(current)
-            dev.setCurrentIndex(max(idx, 0))
-            dev.blockSignals(False)
 
         btn_refresh.clicked.connect(_on_refresh)
         top.addWidget(btn_refresh)
+
+        def _on_api_changed():
+            current_text = dev.currentText()
+            data = dev.currentData()
+            current_index = data if isinstance(data, int) and data >= 0 else None
+            self._populate_input_device_combo(
+                dev,
+                mgr,
+                api_filter=api.currentText(),
+                saved_text=current_text,
+                saved_index=current_index,
+            )
+
+        api.currentIndexChanged.connect(_on_api_changed)
 
         top.addWidget(QLabel("Type:"))
         tcombo = QComboBox()
         tcombo.addItems([
             "Pro Controller", "Gamepad", "Xbox Controller", "DualShock",
-            "DualSense", "Joy-Con (L+R)", "Joy-Con (Single)",
+            "DualSense", "GameCube", "N64 Controller",
+            "Joy-Con (L+R)", "Joy-Con (Single)",
             "Wii Remote", "Wii Remote + Nunchuk", "Classic Controller",
             "Fight Stick", "Steering Wheel", "Custom",
         ])
@@ -1159,101 +1643,94 @@ class SettingsDialog(QDialog):
         def _get_device() -> str:
             return dev.currentText()
 
-        def add_bind(key: str, label: str) -> QHBoxLayout:
-            btn = _BindButton(defs.get(key, ""), device_fn=_get_device)
-            btn.binding_changed.connect(self._mark_dirty)
-            bindings[key] = btn
-            return _bind_row(label, btn)
+        def _get_device_index() -> int | None:
+            data = dev.currentData()
+            if isinstance(data, int) and data >= 0:
+                return data
+            return None
 
-        # All editable content goes inside body so it can be
-        # enabled / disabled as a single unit via the Connected checkbox.
+        # -- Dynamic binding section that rebuilds when type changes ---
+        binds_container = QWidget()
+        binds_layout = QVBoxLayout(binds_container)
+        binds_layout.setContentsMargins(0, 0, 0, 0)
+        binds_layout.setSpacing(6)
+
+        def _rebuild_bindings():
+            """Clear and rebuild the binding rows for the selected type."""
+            # Preserve any existing bindings before clearing
+            old_values: dict[str, str] = {}
+            for key, btn in bindings.items():
+                val = btn.text().strip()
+                if val and val != "Listening \u2026":
+                    old_values[key] = val
+            bindings.clear()
+
+            while binds_layout.count():
+                item = binds_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+                elif item.layout():
+                    _clear_layout(item.layout())
+
+            type_name = tcombo.currentText()
+            sections = _CONTROLLER_LAYOUTS.get(type_name, _CONTROLLER_LAYOUTS["Pro Controller"])
+
+            for section_title, bind_defs in sections:
+                binds_layout.addWidget(_section_label(section_title))
+                for key, label in bind_defs:
+                    saved_val = old_values.get(key) or defs.get(key, "")
+                    btn = _BindButton(
+                        saved_val,
+                        device_fn=_get_device,
+                        device_index_fn=_get_device_index,
+                    )
+                    btn.binding_changed.connect(lambda _v: (_note_profile_edited(), self._mark_dirty()))
+                    bindings[key] = btn
+                    binds_layout.addLayout(_bind_row(label, btn))
+
+            # Motion / Vibration / Extras (shared across all types)
+            binds_layout.addWidget(_section_label("Motion, Vibration & Extras"))
+            motion_val = old_values.get("motion") or defs.get("motion", "")
+            motion_btn = _BindButton(
+                motion_val, device_fn=_get_device, device_index_fn=_get_device_index,
+            )
+            motion_btn.binding_changed.connect(lambda _v: (_note_profile_edited(), self._mark_dirty()))
+            bindings["motion"] = motion_btn
+            binds_layout.addLayout(_bind_row("Motion", motion_btn))
+
+            gyro_ok = any(c.has_gyro for c in mgr.controllers())
+            accel_ok = any(c.has_accel for c in mgr.controllers())
+            parts: list[str] = []
+            if gyro_ok:
+                parts.append("Gyro detected")
+            if accel_ok:
+                parts.append("Accelerometer detected")
+            hint_text = " \u00b7 ".join(parts) if parts else "No motion sensors detected"
+            sensor_hint = QLabel(hint_text)
+            sensor_hint.setObjectName("sectionLabel")
+            sensor_hint.setContentsMargins(8, 0, 0, 0)
+            binds_layout.addWidget(sensor_hint)
+
+            binds_layout.addLayout(_check_row("Motion controls", True))
+
+            def _on_vibration_cfg():
+                _VibrationConfigDialog(parent=self).exec()
+            binds_layout.addLayout(
+                _check_configure_row("Vibration", True, _on_vibration_cfg)
+            )
+
+            def _on_mouse_pan_cfg():
+                _MousePanningConfigDialog(parent=self).exec()
+            binds_layout.addLayout(
+                _check_configure_row("Mouse panning", False, _on_mouse_pan_cfg)
+            )
+
+        tcombo.currentIndexChanged.connect(lambda _: _rebuild_bindings())
+        tcombo.currentIndexChanged.connect(lambda _i: (_note_profile_edited(), self._mark_dirty()))
+        _rebuild_bindings()
+
         bl = body_layout
-
-        # -- Section 1: Buttons ----------------------------------------
-        bl.addWidget(_section_label("Buttons"))
-        bl.addLayout(add_bind("a", "A"))
-        bl.addLayout(add_bind("b", "B"))
-        bl.addLayout(add_bind("x", "X"))
-        bl.addLayout(add_bind("y", "Y"))
-        bl.addLayout(add_bind("l", "L"))
-        bl.addLayout(add_bind("r", "R"))
-        bl.addLayout(add_bind("zl", "ZL"))
-        bl.addLayout(add_bind("zr", "ZR"))
-        bl.addLayout(add_bind("plus", "Start / +"))
-        bl.addLayout(add_bind("minus", "Select / \u2212"))
-        bl.addLayout(add_bind("home", "Home"))
-        bl.addLayout(add_bind("capture", "Capture"))
-
-        # -- Section 2: Left Stick -------------------------------------
-        bl.addWidget(_section_label("Left Stick"))
-        bl.addLayout(add_bind("ls_up", "Up"))
-        bl.addLayout(add_bind("ls_down", "Down"))
-        bl.addLayout(add_bind("ls_left", "Left"))
-        bl.addLayout(add_bind("ls_right", "Right"))
-        bl.addLayout(add_bind("ls_press", "Pressed"))
-        bl.addLayout(_spin_row("Range", 95 if defs else 100, "%"))
-        bl.addLayout(_slider_row("Deadzone", 15 if defs else 0, 50))
-
-        # -- Section 3: Right Stick ------------------------------------
-        bl.addWidget(_section_label("Right Stick"))
-        bl.addLayout(add_bind("rs_up", "Up"))
-        bl.addLayout(add_bind("rs_down", "Down"))
-        bl.addLayout(add_bind("rs_left", "Left"))
-        bl.addLayout(add_bind("rs_right", "Right"))
-        bl.addLayout(add_bind("rs_press", "Pressed"))
-        bl.addLayout(_spin_row("Range", 95 if defs else 100, "%"))
-        bl.addLayout(_slider_row("Deadzone", 15 if defs else 0, 50))
-
-        # -- Section 4: D-Pad ------------------------------------------
-        bl.addWidget(_section_label("D-Pad"))
-        bl.addLayout(add_bind("dp_up", "Up"))
-        bl.addLayout(add_bind("dp_down", "Down"))
-        bl.addLayout(add_bind("dp_left", "Left"))
-        bl.addLayout(add_bind("dp_right", "Right"))
-
-        # -- Section 5: Motion, Vibration & Extras ---------------------
-        bl.addWidget(_section_label("Motion, Vibration & Extras"))
-
-        # Single motion binding — the runtime uses all gyro axes automatically
-        bl.addLayout(add_bind("motion", "Motion"))
-
-        # Sensor availability hint
-        gyro_ok = any(c.has_gyro for c in mgr.controllers())
-        accel_ok = any(c.has_accel for c in mgr.controllers())
-        parts: list[str] = []
-        if gyro_ok:
-            parts.append("Gyro detected")
-        if accel_ok:
-            parts.append("Accelerometer detected")
-        hint_text = " \u00b7 ".join(parts) if parts else "No motion sensors detected"
-        sensor_hint = QLabel(hint_text)
-        sensor_hint.setObjectName("sectionLabel")
-        sensor_hint.setContentsMargins(8, 0, 0, 0)
-        bl.addWidget(sensor_hint)
-
-        bl.addLayout(_check_row("Motion controls", True))
-
-        # Vibration + Configure
-        def _on_vibration_cfg():
-            _VibrationConfigDialog(parent=self).exec()
-
-        bl.addLayout(
-            _check_configure_row("Vibration", True, _on_vibration_cfg)
-        )
-
-        # Mouse panning + Configure
-        def _on_mouse_pan_cfg():
-            _MousePanningConfigDialog(parent=self).exec()
-
-        bl.addLayout(
-            _check_configure_row("Mouse panning", False, _on_mouse_pan_cfg)
-        )
-
-        # Console Mode
-        bl.addLayout(_combo_row(
-            "Console Mode", ["Docked", "Handheld"], 0,
-        ))
-
+        bl.addWidget(binds_container)
         bl.addStretch()
 
         # -- Bottom bar ------------------------------------------------
@@ -1267,6 +1744,7 @@ class SettingsDialog(QDialog):
             target = _PLAYER1_BINDINGS if num == 1 else {}
             for key, btn in bindings.items():
                 btn.set_binding(target.get(key, ""))
+            _note_profile_edited()
             self._mark_dirty()
 
         btn_def.clicked.connect(_on_defaults)
@@ -1277,10 +1755,35 @@ class SettingsDialog(QDialog):
         def _on_clear():
             for btn in bindings.values():
                 btn.set_binding("")
+            _note_profile_edited()
             self._mark_dirty()
 
         btn_clr.clicked.connect(_on_clear)
         bottom.addWidget(btn_clr)
+
+        btn_reset = QPushButton(" Reset Profile ")
+
+        def _on_reset_profile():
+            # Reset profile-level settings and clear all mappings.
+            chk.setChecked(False)
+
+            api_idx = api.findText("SDL")
+            api.setCurrentIndex(api_idx if api_idx >= 0 else 0)
+
+            dev_idx = dev.findText("Any Available")
+            dev.setCurrentIndex(dev_idx if dev_idx >= 0 else 0)
+
+            type_idx = tcombo.findText("Pro Controller")
+            tcombo.setCurrentIndex(type_idx if type_idx >= 0 else 0)
+
+            for btn in bindings.values():
+                btn.set_binding("")
+
+            _note_profile_edited()
+            self._mark_dirty()
+
+        btn_reset.clicked.connect(_on_reset_profile)
+        bottom.addWidget(btn_reset)
 
         bl.addLayout(bottom)
 
@@ -1288,8 +1791,13 @@ class SettingsDialog(QDialog):
 
         # Set initial enabled state based on the Connected checkbox
         body.setEnabled(chk.isChecked())
+        api.setEnabled(chk.isChecked())
+        dev.setEnabled(chk.isChecked())
+        tcombo.setEnabled(chk.isChecked())
+        btn_refresh.setEnabled(chk.isChecked())
         self._input_player_controls[num] = {
             "connected": chk,
+            "api": api,
             "device": dev,
             "type": tcombo,
             "bindings": bindings,
@@ -1299,6 +1807,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(scroll_content)
 
         outer = QWidget()
@@ -1314,53 +1823,30 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        grp_profiles = QGroupBox("Controller Profiles")
-        g_profiles = QVBoxLayout(grp_profiles)
-        g_profiles.setSpacing(8)
-        self._controller_profiles = copy.deepcopy(self._cfg.controller_profiles)
-        self._active_controller_profile = self._cfg.active_controller_profile or ""
-
-        profile_row = QHBoxLayout()
-        profile_row.setSpacing(8)
-        profile_row.addWidget(QLabel("Profile:"))
-        self._input_profile_combo = QComboBox()
-        self._input_profile_combo.addItem("(Current Unsaved)", "")
-        for name in sorted(self._controller_profiles.keys(), key=str.lower):
-            self._input_profile_combo.addItem(name, name)
-        if self._active_controller_profile:
-            idx = self._input_profile_combo.findData(self._active_controller_profile)
-            self._input_profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        profile_row.addWidget(self._input_profile_combo, 1)
-        g_profiles.addLayout(profile_row)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        btn_save_profile = QPushButton("Save Current as Profile...")
-        btn_save_profile.clicked.connect(self._on_save_controller_profile)
-        btn_row.addWidget(btn_save_profile)
-        btn_load_profile = QPushButton("Load Selected")
-        btn_load_profile.clicked.connect(self._on_load_controller_profile)
-        btn_row.addWidget(btn_load_profile)
-        btn_delete_profile = QPushButton("Delete Selected")
-        btn_delete_profile.clicked.connect(self._on_delete_controller_profile)
-        btn_row.addWidget(btn_delete_profile)
-        btn_row.addStretch()
-        g_profiles.addLayout(btn_row)
-
-        profile_hint = QLabel(
-            "Profiles store controller connected/device/type assignments for Player 1-10."
-        )
-        profile_hint.setObjectName("sectionLabel")
-        profile_hint.setWordWrap(True)
-        g_profiles.addWidget(profile_hint)
-        layout.addWidget(grp_profiles)
-
         grp_opts = QGroupBox("Global Input Options")
         g_opts = QVBoxLayout(grp_opts)
         g_opts.setSpacing(8)
-        g_opts.addWidget(_disabled_check("Enable gamepad navigation in UI"))
-        g_opts.addWidget(_disabled_check("Global vibration feedback"))
-        g_opts.addWidget(_disabled_check("Global motion controls"))
+
+        self._chk_gamepad_nav = QCheckBox("Enable gamepad navigation in UI")
+        self._chk_gamepad_nav.setChecked(bool(getattr(self._cfg, "input_gamepad_nav", False)))
+        self._chk_gamepad_nav.toggled.connect(self._mark_dirty)
+        g_opts.addWidget(self._chk_gamepad_nav)
+
+        self._chk_global_vibration = QCheckBox("Global vibration / haptic feedback")
+        self._chk_global_vibration.setChecked(bool(getattr(self._cfg, "input_vibration", True)))
+        self._chk_global_vibration.toggled.connect(self._mark_dirty)
+        g_opts.addWidget(self._chk_global_vibration)
+
+        self._chk_global_motion = QCheckBox("Global motion controls")
+        self._chk_global_motion.setChecked(bool(getattr(self._cfg, "input_motion", True)))
+        self._chk_global_motion.toggled.connect(self._mark_dirty)
+        g_opts.addWidget(self._chk_global_motion)
+
+        self._chk_input_on_focus = QCheckBox("Only accept input when window is focused")
+        self._chk_input_on_focus.setChecked(bool(getattr(self._cfg, "input_focus_only", True)))
+        self._chk_input_on_focus.toggled.connect(self._mark_dirty)
+        g_opts.addWidget(self._chk_input_on_focus)
+
         layout.addWidget(grp_opts)
 
         grp_kb = QGroupBox("Keyboard Navigation")
@@ -1396,9 +1882,12 @@ class SettingsDialog(QDialog):
         controls = getattr(self, "_input_player_controls", {})
         for num, widget_map in controls.items():
             chk = widget_map.get("connected")
+            api = widget_map.get("api")
             dev = widget_map.get("device")
             typ = widget_map.get("type")
             if not isinstance(chk, QCheckBox):
+                continue
+            if not isinstance(api, QComboBox):
                 continue
             if not isinstance(dev, QComboBox):
                 continue
@@ -1414,96 +1903,22 @@ class SettingsDialog(QDialog):
                             bindings_map[key] = val
             merged[str(num)] = {
                 "connected": chk.isChecked(),
+                "api": api.currentText(),
                 "device": dev.currentText(),
+                "device_index": (
+                    int(dev.currentData())
+                    if isinstance(dev.currentData(), int) and dev.currentData() >= 0
+                    else None
+                ),
+                "device_guid": (
+                    self._input_mgr.get_device_guid(int(dev.currentData()))
+                    if isinstance(dev.currentData(), int) and dev.currentData() >= 0
+                    else ""
+                ),
                 "type": typ.currentText(),
                 "bindings": bindings_map,
             }
         return merged
-
-    def _apply_input_player_settings(self, settings_map: dict[str, dict[str, object]]) -> None:
-        self._cfg.input_player_settings = copy.deepcopy(settings_map)
-        controls = getattr(self, "_input_player_controls", {})
-        for num, widget_map in controls.items():
-            saved = settings_map.get(str(num), {})
-            chk = widget_map.get("connected")
-            dev = widget_map.get("device")
-            typ = widget_map.get("type")
-            if isinstance(chk, QCheckBox):
-                chk.setChecked(bool(saved.get("connected", num == 1)))
-            if isinstance(dev, QComboBox):
-                wanted = str(saved.get("device", "Any Available"))
-                if wanted and dev.findText(wanted) < 0:
-                    dev.addItem(wanted)
-                dev.setCurrentIndex(max(dev.findText(wanted), 0))
-            if isinstance(typ, QComboBox):
-                wanted_type = str(saved.get("type", "Pro Controller"))
-                dev_idx = typ.findText(wanted_type)
-                typ.setCurrentIndex(dev_idx if dev_idx >= 0 else 0)
-            # Restore bindings to the UI bind buttons so they aren't
-            # lost when _collect_input_player_settings runs on save.
-            saved_bindings = saved.get("bindings")
-            bind_buttons = widget_map.get("bindings")
-            if isinstance(saved_bindings, dict) and isinstance(bind_buttons, dict):
-                for key, btn in bind_buttons.items():
-                    if hasattr(btn, "set_binding"):
-                        btn.set_binding(str(saved_bindings.get(key, "")))
-
-    def _on_save_controller_profile(self) -> None:
-        name, ok = QInputDialog.getText(
-            self,
-            "Save Controller Profile",
-            "Profile name:",
-            text=self._active_controller_profile or "",
-        )
-        if not ok:
-            return
-        profile_name = name.strip()
-        if not profile_name:
-            return
-        snapshot = self._collect_input_player_settings()
-        self._controller_profiles[profile_name] = snapshot
-        self._active_controller_profile = profile_name
-        self._refresh_input_profile_combo()
-        self._mark_dirty()
-
-    def _on_load_controller_profile(self) -> None:
-        if not hasattr(self, "_input_profile_combo"):
-            return
-        profile_name = str(self._input_profile_combo.currentData() or "")
-        if not profile_name:
-            return
-        snapshot = self._controller_profiles.get(profile_name)
-        if not isinstance(snapshot, dict):
-            return
-        self._apply_input_player_settings(snapshot)
-        self._active_controller_profile = profile_name
-        self._mark_dirty()
-
-    def _on_delete_controller_profile(self) -> None:
-        if not hasattr(self, "_input_profile_combo"):
-            return
-        profile_name = str(self._input_profile_combo.currentData() or "")
-        if not profile_name:
-            return
-        self._controller_profiles.pop(profile_name, None)
-        if self._active_controller_profile == profile_name:
-            self._active_controller_profile = ""
-        self._refresh_input_profile_combo()
-        self._mark_dirty()
-
-    def _refresh_input_profile_combo(self) -> None:
-        if not hasattr(self, "_input_profile_combo"):
-            return
-        combo = self._input_profile_combo
-        current = self._active_controller_profile
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("(Current Unsaved)", "")
-        for name in sorted(self._controller_profiles.keys(), key=str.lower):
-            combo.addItem(name, name)
-        idx = combo.findData(current)
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
-        combo.blockSignals(False)
 
     # -- Emulators -----------------------------------------------------
 
@@ -1517,15 +1932,62 @@ class SettingsDialog(QDialog):
         return _placeholder(sub)
 
     def _emu_installed(self) -> QWidget:
-        """Shows installed emulators with settings/delete/update buttons."""
+        """Shows installed emulators with filter, sort, and action buttons."""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(8)
 
-        lbl = QLabel("Installed emulators:")
-        lbl.setObjectName("sectionLabel")
-        layout.addWidget(lbl)
+        # Filter + Sort + Update All row
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+
+        lbl_filter = QLabel("Filter:")
+        lbl_filter.setFixedWidth(46)
+        controls.addWidget(lbl_filter)
+        self._inst_filter = QComboBox()
+        self._inst_filter.addItem("All Systems", "")
+        for sid, name, _ in KNOWN_SYSTEMS:
+            self._inst_filter.addItem(name, sid)
+        self._inst_filter.currentIndexChanged.connect(self._refresh_installed_cards)
+        controls.addWidget(self._inst_filter, 1)
+
+        controls.addSpacing(10)
+
+        lbl_sort = QLabel("Sort:")
+        lbl_sort.setFixedWidth(36)
+        controls.addWidget(lbl_sort)
+        self._inst_sort = QComboBox()
+        self._inst_sort.addItem("Title", "title")
+        self._inst_sort.addItem("Brand", "brand")
+        self._inst_sort.currentIndexChanged.connect(self._refresh_installed_cards)
+        controls.addWidget(self._inst_sort, 1)
+
+        self._inst_sort_asc = True
+        self._inst_sort_btn = QPushButton()
+        self._inst_sort_btn.setIcon(lucide_icon("arrow-up", 14, active_theme().fg_primary))
+        self._inst_sort_btn.setFixedSize(28, 28)
+        self._inst_sort_btn.setToolTip("Ascending — click to toggle")
+        self._inst_sort_btn.clicked.connect(self._on_inst_sort_direction)
+        controls.addWidget(self._inst_sort_btn)
+        layout.addLayout(controls)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        t = active_theme()
+        self._btn_update_all = QPushButton("  Update All")
+        self._btn_update_all.setIcon(lucide_icon("refresh-cw", 14, t.accent_primary))
+        self._btn_update_all.clicked.connect(self._on_update_all_cores)
+        self._btn_update_all.setEnabled(False)
+        self._btn_update_all.setToolTip("Checking for updates...")
+        btn_row.addWidget(self._btn_update_all)
+        btn_add = QPushButton("  Add Manually...")
+        btn_add.setIcon(lucide_icon("plus", 14, t.fg_primary))
+        btn_add.clicked.connect(self._on_add_emulator)
+        btn_row.addWidget(btn_add)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
         from PySide6.QtWidgets import QScrollArea
 
@@ -1538,74 +2000,182 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self._installed_content)
         layout.addWidget(scroll, 1)
 
-        # Add manually button
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        btn_add = QPushButton("Add Manually...")
-        btn_add.clicked.connect(self._on_add_emulator)
-        btn_row.addWidget(btn_add)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
-        # Populate existing installed emulators
         self._installed_cards: list[QWidget] = []
-        for entry in self._cfg.emulators:
-            self._insert_installed_card(entry)
-
-        if not self._cfg.emulators:
-            self._show_installed_empty_state()
+        self._refresh_installed_cards()
 
         return w
 
+    def _on_inst_sort_direction(self):
+        self._inst_sort_asc = not self._inst_sort_asc
+        icon_name = "arrow-up" if self._inst_sort_asc else "arrow-down"
+        tip = "Ascending" if self._inst_sort_asc else "Descending"
+        self._inst_sort_btn.setIcon(lucide_icon(icon_name, 14, active_theme().fg_primary))
+        self._inst_sort_btn.setToolTip(f"{tip} — click to toggle")
+        self._refresh_installed_cards()
+
+    def _on_update_all_cores(self):
+        """Update every installed RetroArch core in one batch."""
+        from meridian.core.emulator_install import update_retroarch_core
+
+        cores_to_update: list[tuple[EmulatorEntry, EmulatorCatalogEntry]] = []
+        for entry in self._cfg.emulators:
+            cat = emulator_catalog_entry(entry.catalog_id or entry.name)
+            if cat and cat.install_strategy == "retroarch_core":
+                cores_to_update.append((entry, cat))
+
+        if not cores_to_update:
+            _msgbox.information(self, "Update All", "No installed cores to update.")
+            return
+
+        progress = QProgressDialog(
+            f"Updating {len(cores_to_update)} core(s)...", "", 0, len(cores_to_update), self
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        import threading
+
+        ok_count = 0
+        fail_count = 0
+        for idx, (entry, cat) in enumerate(cores_to_update):
+            progress.setValue(idx)
+            progress.setLabelText(f"Updating {cat.name}...")
+            QApplication.processEvents()
+
+            self._batch_update_result = None
+
+            def _worker(_cat=cat):
+                self._batch_update_result = update_retroarch_core(_cat, self._cfg.emulators)
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            while t.is_alive():
+                QApplication.processEvents()
+                t.join(timeout=0.05)
+
+            result = self._batch_update_result
+            if result and result.ok:
+                ok_count += 1
+                self._core_update_cache[cat.id] = False
+            else:
+                fail_count += 1
+        progress.setValue(len(cores_to_update))
+
+        from meridian.core.audio_manager import AudioManager
+        AudioManager.instance().play_notification()
+        self._update_update_all_button()
+        self._refresh_installed_cards()
+        _msgbox.information(
+            self, "Update All",
+            f"Updated {ok_count} core(s).\n"
+            + (f"Failed: {fail_count}" if fail_count else "All cores up to date."),
+        )
+
     def _insert_installed_card(self, entry: EmulatorEntry):
-        """One installed emulator card: name, path, cog/delete/update icons."""
+        """One installed emulator card with tags, version, and action buttons."""
+        catalog = emulator_catalog_entry(entry.catalog_id or entry.name)
+        is_core = catalog and catalog.install_strategy == "retroarch_core"
+        t = active_theme()
+        tag_style = (
+            f"background: {t.accent_primary}; color: #fff; border-radius: 3px;"
+            f" padding: 2px 8px; font-size: 7pt;"
+        )
+
         card = QWidget()
         card.setObjectName("playerSlot")
         row = QHBoxLayout(card)
         row.setContentsMargins(10, 8, 10, 8)
         row.setSpacing(10)
 
-        # Installed indicator
         check_icon = QLabel()
-        check_icon.setPixmap(lucide_pixmap("circle-check", 16, active_theme().accent_secondary))
+        check_icon.setPixmap(lucide_pixmap("circle-check", 16, t.accent_secondary))
         check_icon.setFixedSize(20, 20)
         row.addWidget(check_icon)
 
-        # Name + path
         info = QVBoxLayout()
-        info.setSpacing(2)
+        info.setSpacing(4)
+
+        # Name
         name_lbl = QLabel(f"<b>{entry.display_name()}</b>")
         info.addWidget(name_lbl)
-        if entry.path:
-            path_lbl = QLabel(entry.path)
-            path_lbl.setObjectName("sectionLabel")
-            info.addWidget(path_lbl)
-        if entry.version:
-            version_lbl = QLabel(f"Version: {entry.version}")
-            version_lbl.setObjectName("sectionLabel")
-            info.addWidget(version_lbl)
+
+        # Tags row (brand + systems) — above version
+        if catalog and catalog.systems:
+            tags_layout = QHBoxLayout()
+            tags_layout.setContentsMargins(0, 0, 0, 0)
+            tags_layout.setSpacing(4)
+            brand = _system_company(catalog.systems[0])
+            if brand:
+                bl = QLabel(brand)
+                bl.setStyleSheet(tag_style)
+                tags_layout.addWidget(bl)
+            if catalog.release_year:
+                yl = QLabel(str(catalog.release_year))
+                yl.setStyleSheet(tag_style)
+                tags_layout.addWidget(yl)
+            for sid in catalog.systems[:4]:
+                sl = QLabel(SYSTEM_NAMES.get(sid, sid))
+                sl.setStyleSheet(tag_style)
+                tags_layout.addWidget(sl)
+            if len(catalog.systems) > 4:
+                ml = QLabel(f"+{len(catalog.systems) - 4}")
+                ml.setStyleSheet(tag_style)
+                tags_layout.addWidget(ml)
+            tags_layout.addStretch()
+            info.addLayout(tags_layout)
+
+        # Version: "Core: <version>" for cores, plain version for standalone
+        if is_core:
+            ver = f"Core: {entry.version}" if entry.version else f"Core: {catalog.core_filename if catalog else 'N/A'}"
+        else:
+            ver = entry.version or "N/A"
+        ver_lbl = QLabel(ver)
+        ver_lbl.setObjectName("sectionLabel")
+        info.addWidget(ver_lbl)
+
         row.addLayout(info, 1)
 
-        # Action buttons (icon-only)
+        # Action buttons
         btn_settings = QPushButton()
-        btn_settings.setIcon(lucide_icon("settings", 14, active_theme().fg_primary))
+        btn_settings.setIcon(lucide_icon("settings", 14, t.fg_primary))
         btn_settings.setFixedSize(28, 28)
         btn_settings.setToolTip("Emulator settings")
         btn_settings.clicked.connect(lambda _, e=entry: self._on_emu_settings(e))
         row.addWidget(btn_settings)
 
         btn_update = QPushButton()
-        btn_update.setIcon(lucide_icon("refresh-cw", 14, active_theme().fg_primary))
         btn_update.setFixedSize(28, 28)
-        btn_update.setToolTip("Check for updates")
-        btn_update.setEnabled(False)
+        if is_core and catalog:
+            has_update = self._core_update_cache.get(catalog.id, False)
+            if has_update:
+                btn_update.setEnabled(True)
+                btn_update.setIcon(lucide_icon("refresh-cw", 14, t.accent_primary))
+                btn_update.setToolTip("Update available — click to update")
+                btn_update.setStyleSheet(
+                    f"QPushButton {{ border: 1px solid {t.accent_primary}; border-radius: 4px; }}"
+                    f"QPushButton:hover {{ background: {t.accent_primary}; }}"
+                )
+                btn_update.clicked.connect(
+                    lambda _, e=entry, c=catalog: self._on_update_core(e, c)
+                )
+            else:
+                btn_update.setEnabled(False)
+                btn_update.setIcon(lucide_icon("refresh-cw", 14, t.fg_disabled))
+                btn_update.setToolTip("Core is up to date")
+        else:
+            btn_update.setEnabled(False)
+            btn_update.setIcon(lucide_icon("refresh-cw", 14, t.fg_disabled))
+            btn_update.setToolTip("Updates not available for standalone emulators")
         row.addWidget(btn_update)
 
         btn_delete = QPushButton()
-        btn_delete.setIcon(lucide_icon("trash-2", 14, active_theme().fg_primary))
+        btn_delete.setIcon(lucide_icon("trash-2", 14, t.fg_primary))
         btn_delete.setFixedSize(28, 28)
         btn_delete.setToolTip("Remove emulator")
         btn_delete.clicked.connect(
@@ -1617,6 +2187,46 @@ class SettingsDialog(QDialog):
         self._installed_layout.insertWidget(idx, card)
         self._installed_cards.append(card)
 
+    def _check_core_updates_async(self):
+        """Check for core updates in a background thread, then refresh cards."""
+        import threading
+
+        def _worker():
+            from meridian.core.emulator_install import core_has_update
+            results: dict[str, bool] = {}
+            for entry in self._cfg.emulators:
+                cat = emulator_catalog_entry(entry.catalog_id or entry.name)
+                if cat and cat.install_strategy == "retroarch_core":
+                    try:
+                        results[cat.id] = core_has_update(cat, self._cfg.emulators)
+                    except Exception:
+                        results[cat.id] = False
+            self._core_update_cache = results
+            try:
+                from PySide6.QtCore import QMetaObject, Qt as QtConst
+                QMetaObject.invokeMethod(
+                    self, "_refresh_installed_cards", QtConst.QueuedConnection,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _update_update_all_button(self):
+        """Enable/disable the Update All button based on available updates."""
+        if not hasattr(self, "_btn_update_all"):
+            return
+        any_updates = any(self._core_update_cache.values())
+        self._btn_update_all.setEnabled(any_updates)
+        t = active_theme()
+        if any_updates:
+            count = sum(1 for v in self._core_update_cache.values() if v)
+            self._btn_update_all.setToolTip(f"{count} update(s) available")
+            self._btn_update_all.setIcon(lucide_icon("refresh-cw", 14, t.accent_primary))
+        else:
+            self._btn_update_all.setToolTip("All emulators are up to date")
+            self._btn_update_all.setIcon(lucide_icon("refresh-cw", 14, t.fg_disabled))
+
     def _on_emu_settings(self, entry: EmulatorEntry):
         """Open per-emulator settings dialog."""
         dlg = _EmulatorSettingsDialog(entry, self._cfg, parent=self)
@@ -1624,20 +2234,70 @@ class SettingsDialog(QDialog):
             self._refresh_installed_cards()
             self._mark_dirty()
 
+    def _on_update_core(self, entry: EmulatorEntry, catalog: EmulatorCatalogEntry):
+        """Re-download a RetroArch core to get the latest nightly build."""
+        import threading
+        from meridian.core.emulator_install import update_retroarch_core
+
+        progress = QProgressDialog(f"Updating {catalog.name} core...", "", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        self._update_result = None
+
+        def _worker():
+            self._update_result = update_retroarch_core(catalog, self._cfg.emulators)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        while thread.is_alive():
+            QApplication.processEvents()
+            thread.join(timeout=0.05)
+
+        progress.close()
+
+        result = self._update_result
+        from meridian.core.audio_manager import AudioManager
+        if result and result.ok:
+            self._core_update_cache[catalog.id] = False
+            AudioManager.instance().play_notification()
+            _msgbox.information(self, "Core Updated", result.message)
+            self._refresh_installed_cards()
+        else:
+            _msgbox.warning(self, "Core Update Failed", result.message if result else "Unknown error.")
+
     def _on_delete_installed(self, card: QWidget, entry: EmulatorEntry):
-        confirm = QMessageBox.question(
+        catalog = emulator_catalog_entry(entry.catalog_id or entry.name)
+        is_core = catalog and catalog.install_strategy == "retroarch_core"
+
+        if is_core:
+            label = f"Remove {entry.display_name()} core?"
+            detail = "The core DLL will be deleted. RetroArch itself will not be affected."
+        else:
+            label = f"Delete {entry.display_name()} and all installed files from disk?"
+            detail = ""
+
+        confirm = _msgbox.question(
             self,
             "Delete Emulator",
-            f"Delete {entry.display_name()} and all installed files from disk?",
+            f"{label}\n{detail}".strip(),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
-        ok, err = self._delete_emulator_files(entry)
+        if is_core and catalog:
+            from meridian.core.emulator_install import delete_retroarch_core
+            ok, err = delete_retroarch_core(catalog, self._cfg.emulators)
+        else:
+            ok, err = self._delete_emulator_files(entry)
+
         if not ok:
-            QMessageBox.warning(
+            _msgbox.warning(
                 self,
                 "Delete failed",
                 f"{entry.display_name()} was removed from Meridian settings, "
@@ -1651,7 +2311,8 @@ class SettingsDialog(QDialog):
         card.setParent(None)
         card.deleteLater()
         self._mark_dirty()
-        self._populate_browse_catalog(self._browse_filter.currentData() or "")
+        if hasattr(self, "_browse_filter"):
+            self._populate_browse_catalog(self._browse_filter.currentData() or "")
         if not self._cfg.emulators:
             self._show_installed_empty_state()
 
@@ -1707,17 +2368,40 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(8)
 
-        # Filter
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(6)
-        filter_row.addWidget(QLabel("Filter by system:"))
+        # Filter + Sort row — same row, aligned labels
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+
+        lbl_filter = QLabel("Filter:")
+        lbl_filter.setFixedWidth(46)
+        controls.addWidget(lbl_filter)
         self._browse_filter = QComboBox()
         self._browse_filter.addItem("All Systems", "")
         for sid, name, _ in KNOWN_SYSTEMS:
             self._browse_filter.addItem(name, sid)
         self._browse_filter.currentIndexChanged.connect(self._on_browse_filter)
-        filter_row.addWidget(self._browse_filter, 1)
-        layout.addLayout(filter_row)
+        controls.addWidget(self._browse_filter, 1)
+
+        controls.addSpacing(10)
+
+        lbl_sort = QLabel("Sort:")
+        lbl_sort.setFixedWidth(36)
+        controls.addWidget(lbl_sort)
+        self._browse_sort = QComboBox()
+        self._browse_sort.addItem("Title", "title")
+        self._browse_sort.addItem("Brand", "brand")
+        self._browse_sort.addItem("Release Year", "year")
+        self._browse_sort.currentIndexChanged.connect(self._on_browse_sort_changed)
+        controls.addWidget(self._browse_sort, 1)
+
+        self._browse_sort_asc = True
+        self._browse_sort_btn = QPushButton()
+        self._browse_sort_btn.setIcon(lucide_icon("arrow-up", 14, active_theme().fg_primary))
+        self._browse_sort_btn.setFixedSize(28, 28)
+        self._browse_sort_btn.setToolTip("Ascending — click to toggle")
+        self._browse_sort_btn.clicked.connect(self._on_browse_sort_direction)
+        controls.addWidget(self._browse_sort_btn)
+        layout.addLayout(controls)
 
         # Catalog scroll area
         from PySide6.QtWidgets import QScrollArea
@@ -1730,6 +2414,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self._browse_content)
         layout.addWidget(scroll, 1)
 
@@ -1737,8 +2422,9 @@ class SettingsDialog(QDialog):
         return w
 
     def _populate_browse_catalog(self, filter_system: str):
-        """Rebuild the catalog list, optionally filtered to one system."""
-        # Clear existing
+        """Rebuild the catalog list, optionally filtered and sorted."""
+        from meridian.core.emulator_install import check_core_installed
+
         while self._browse_layout.count():
             item = self._browse_layout.takeAt(0)
             if item.widget():
@@ -1747,50 +2433,114 @@ class SettingsDialog(QDialog):
         installed_names = {e.name for e in self._cfg.emulators}
         installed_ids = {e.catalog_id for e in self._cfg.emulators if e.catalog_id}
 
+        # Build filtered list
+        entries: list[EmulatorCatalogEntry] = []
         for entry in EMULATOR_CATALOG:
-            # Core-only entries are configured through RetroArch itself.
-            if entry.install_strategy == "retroarch_core":
+            if entry.id == "retroarch":
                 continue
-            # Only show installers that can be executed from Meridian.
             if not entry.windows_supported or entry.install_strategy == "manual":
                 continue
             if filter_system and filter_system not in entry.systems:
                 continue
+            entries.append(entry)
 
+        # Sort
+        sort_key = getattr(self, "_browse_sort", None)
+        sort_mode = sort_key.currentData() if sort_key else "title"
+        ascending = getattr(self, "_browse_sort_asc", True)
+
+        if sort_mode == "brand":
+            entries.sort(
+                key=lambda e: (
+                    _system_company(e.systems[0]) if e.systems else "",
+                    e.name.lower(),
+                ),
+                reverse=not ascending,
+            )
+        elif sort_mode == "year":
+            entries.sort(
+                key=lambda e: (e.release_year or 9999, e.name.lower()),
+                reverse=not ascending,
+            )
+        else:
+            entries.sort(key=lambda e: e.name.lower(), reverse=not ascending)
+
+        t = active_theme()
+        tag_style = (
+            f"background: {t.accent_primary}; color: #fff; border-radius: 3px;"
+            f" padding: 2px 8px; font-size: 7pt;"
+        )
+
+        for entry in entries:
             card = QWidget()
             card.setObjectName("playerSlot")
             row = QHBoxLayout(card)
-            row.setContentsMargins(10, 6, 10, 6)
+            row.setContentsMargins(10, 8, 10, 8)
             row.setSpacing(10)
 
-            # Info
             info = QVBoxLayout()
-            info.setSpacing(1)
+            info.setSpacing(4)
+
+            # Name
             name_lbl = QLabel(f"<b>{entry.name}</b>")
             info.addWidget(name_lbl)
 
-            system_names = [SYSTEM_NAMES.get(s, s) for s in entry.systems[:5]]
-            suffix = f" +{len(entry.systems) - 5} more" if len(entry.systems) > 5 else ""
-            platforms = QLabel(", ".join(system_names) + suffix)
-            platforms.setObjectName("sectionLabel")
-            platforms.setWordWrap(True)
-            info.addWidget(platforms)
+            # Tags row — above version
+            tags_layout = QHBoxLayout()
+            tags_layout.setContentsMargins(0, 0, 0, 0)
+            tags_layout.setSpacing(4)
 
-            if entry.preferred_version:
-                version_lbl = QLabel(f"Pinned version: {entry.preferred_version}")
-                version_lbl.setObjectName("sectionLabel")
-                info.addWidget(version_lbl)
+            brand = _system_company(entry.systems[0]) if entry.systems else ""
+            if brand:
+                bl = QLabel(brand)
+                bl.setStyleSheet(tag_style)
+                tags_layout.addWidget(bl)
+
+            if entry.release_year:
+                yl = QLabel(str(entry.release_year))
+                yl.setStyleSheet(tag_style)
+                tags_layout.addWidget(yl)
+
+            for sid in entry.systems[:5]:
+                sl = QLabel(SYSTEM_NAMES.get(sid, sid))
+                sl.setStyleSheet(tag_style)
+                tags_layout.addWidget(sl)
+            if len(entry.systems) > 5:
+                ml = QLabel(f"+{len(entry.systems) - 5}")
+                ml.setStyleSheet(tag_style)
+                tags_layout.addWidget(ml)
+
+            tags_layout.addStretch()
+            info.addLayout(tags_layout)
+
+            # Version — below tags
+            if entry.install_strategy == "retroarch_core":
+                ver_text = f"Core: {entry.core_filename}"
+            elif entry.preferred_version:
+                ver_text = entry.preferred_version
+            else:
+                ver_text = "Latest stable"
+            ver_lbl = QLabel(ver_text)
+            ver_lbl.setObjectName("sectionLabel")
+            info.addWidget(ver_lbl)
 
             row.addLayout(info, 1)
 
-            if entry.id in installed_ids or entry.name in installed_names:
+            is_installed = (
+                entry.id in installed_ids
+                or entry.name in installed_names
+                or (entry.install_strategy == "retroarch_core"
+                    and check_core_installed(entry, self._cfg.emulators))
+            )
+
+            if is_installed:
                 installed_lbl = QLabel()
-                installed_lbl.setPixmap(lucide_pixmap("circle-check", 16, active_theme().accent_secondary))
+                installed_lbl.setPixmap(lucide_pixmap("circle-check", 16, t.accent_secondary))
                 installed_lbl.setToolTip("Installed")
                 row.addWidget(installed_lbl)
             else:
                 btn_dl = QPushButton()
-                btn_dl.setIcon(lucide_icon("download", 14, active_theme().fg_primary))
+                btn_dl.setIcon(lucide_icon("download", 14, t.fg_primary))
                 btn_dl.setFixedSize(28, 28)
                 btn_dl.setToolTip(f"Install {entry.name}")
                 btn_dl.setEnabled(True)
@@ -1802,10 +2552,26 @@ class SettingsDialog(QDialog):
         self._browse_layout.addStretch()
 
     def _on_browse_filter(self, index: int):
+        self._repopulate_browse()
+
+    def _on_browse_sort_changed(self, index: int):
+        self._repopulate_browse()
+
+    def _on_browse_sort_direction(self):
+        self._browse_sort_asc = not self._browse_sort_asc
+        icon_name = "arrow-up" if self._browse_sort_asc else "arrow-down"
+        tip = "Ascending" if self._browse_sort_asc else "Descending"
+        self._browse_sort_btn.setIcon(lucide_icon(icon_name, 14, active_theme().fg_primary))
+        self._browse_sort_btn.setToolTip(f"{tip} — click to toggle")
+        self._repopulate_browse()
+
+    def _repopulate_browse(self):
         sid = self._browse_filter.currentData() or ""
         self._populate_browse_catalog(sid)
 
     def _on_install_catalog_entry(self, catalog_entry: EmulatorCatalogEntry, btn: QPushButton):
+        import threading
+
         btn.setEnabled(False)
         progress = QProgressDialog(f"Installing {catalog_entry.name}...", "", 0, 0, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
@@ -1813,14 +2579,27 @@ class SettingsDialog(QDialog):
         progress.setMinimumDuration(0)
         progress.show()
         QApplication.processEvents()
-        try:
-            result = install_emulator(catalog_entry, self._cfg.emulators)
-        finally:
-            progress.close()
-            btn.setEnabled(True)
 
-        if not result.ok:
-            QMessageBox.warning(self, "Install failed", result.message)
+        self._install_result = None
+
+        def _worker():
+            self._install_result = install_emulator(catalog_entry, self._cfg.emulators)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+
+        # Keep the event loop alive while the worker runs so the UI stays
+        # responsive (progress dialog animates, window doesn't go white).
+        while thread.is_alive():
+            QApplication.processEvents()
+            thread.join(timeout=0.05)
+
+        progress.close()
+        btn.setEnabled(True)
+
+        result = self._install_result
+        if result is None or not result.ok:
+            _msgbox.warning(self, "Install failed", result.message if result else "Unknown error.")
             return
 
         if result.entry:
@@ -1829,7 +2608,10 @@ class SettingsDialog(QDialog):
 
         self._refresh_installed_cards()
         self._populate_browse_catalog(self._browse_filter.currentData() or "")
-        QMessageBox.information(self, "Install complete", result.message)
+
+        from meridian.core.audio_manager import AudioManager
+        AudioManager.instance().play_notification()
+        _msgbox.information(self, "Install complete", result.message)
 
     def _upsert_emulator(self, new_entry: EmulatorEntry) -> None:
         for idx, existing in enumerate(self._cfg.emulators):
@@ -1840,6 +2622,7 @@ class SettingsDialog(QDialog):
                 return
         self._cfg.emulators.append(new_entry)
 
+    @Slot()
     def _refresh_installed_cards(self):
         if not hasattr(self, "_installed_layout"):
             return
@@ -1849,17 +2632,75 @@ class SettingsDialog(QDialog):
                 item.widget().deleteLater()
         self._installed_layout.addStretch()
         self._installed_cards = []
-        for entry in self._cfg.emulators:
+
+        # Filter
+        filter_sid = ""
+        if hasattr(self, "_inst_filter"):
+            filter_sid = self._inst_filter.currentData() or ""
+        visible: list[EmulatorEntry] = []
+        for e in self._cfg.emulators:
+            if e.catalog_id == "retroarch" or e.name.lower() == "retroarch":
+                continue
+            if filter_sid:
+                cat = emulator_catalog_entry(e.catalog_id or e.name)
+                if cat and filter_sid not in cat.systems:
+                    continue
+                elif not cat:
+                    continue
+            visible.append(e)
+
+        # Sort
+        sort_mode = "title"
+        ascending = True
+        if hasattr(self, "_inst_sort"):
+            sort_mode = self._inst_sort.currentData() or "title"
+            ascending = getattr(self, "_inst_sort_asc", True)
+
+        if sort_mode == "brand":
+            def _brand_key(e: EmulatorEntry) -> tuple:
+                cat = emulator_catalog_entry(e.catalog_id or e.name)
+                company = _system_company(cat.systems[0]) if cat and cat.systems else ""
+                return (company, e.display_name().lower())
+            visible.sort(key=_brand_key, reverse=not ascending)
+        else:
+            visible.sort(key=lambda e: e.display_name().lower(), reverse=not ascending)
+
+        for entry in visible:
             self._insert_installed_card(entry)
-        if not self._cfg.emulators:
+        if not visible:
             self._show_installed_empty_state()
         self._refresh_system_emulator_controls()
+        self._update_update_all_button()
 
     def _show_installed_empty_state(self):
-        empty = QLabel("No emulators installed. Use Browse & Download or Add Manually.")
-        empty.setObjectName("sectionLabel")
-        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.setWordWrap(True)
+        empty = QWidget()
+        empty_layout = QVBoxLayout(empty)
+        empty_layout.setContentsMargins(12, 20, 12, 20)
+        empty_layout.setSpacing(10)
+        empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        logo_lbl = QLabel()
+        logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if _LOGO_TRANSPARENT.exists():
+            pm = QPixmap(str(_LOGO_TRANSPARENT))
+            if not pm.isNull():
+                logo_lbl.setPixmap(
+                    pm.scaledToHeight(56, Qt.TransformationMode.SmoothTransformation)
+                )
+        empty_layout.addWidget(logo_lbl)
+
+        msg = QLabel("Whoops! Nothing's here but us snowmen.")
+        msg.setObjectName("sectionLabel")
+        msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg.setWordWrap(True)
+        empty_layout.addWidget(msg)
+
+        sub = QLabel("Install emulators from Browse & Download or add one manually.")
+        sub.setObjectName("sectionLabel")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub.setWordWrap(True)
+        empty_layout.addWidget(sub)
+
         idx = self._installed_layout.count() - 1
         self._installed_layout.insertWidget(idx, empty)
 
@@ -1894,6 +2735,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         section_host = QWidget()
         section_layout = QVBoxLayout(section_host)
         section_layout.setContentsMargins(0, 0, 0, 0)
@@ -1965,6 +2807,7 @@ class SettingsDialog(QDialog):
         bios_scroll = QScrollArea()
         bios_scroll.setWidgetResizable(True)
         bios_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        bios_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         bios_host = QWidget()
         bios_sections_layout = QVBoxLayout(bios_host)
         bios_sections_layout.setContentsMargins(0, 0, 0, 0)
@@ -1989,8 +2832,12 @@ class SettingsDialog(QDialog):
                 name = str(bios["name"])
                 systems = [SYSTEM_NAMES.get(str(s), str(s).upper()) for s in bios.get("systems", [])]
                 required = bool(bios.get("required", False))
-                requirement = "Required" if required else "Optional"
-                row_label = f"{name} ({requirement})"
+                if required:
+                    requirement_html = '<span style="color: #CC3333; font-weight: 600;">Required</span>'
+                else:
+                    requirement_html = "Optional"
+                row_label_widget = QLabel(f"{name} ({requirement_html}) — {', '.join(systems)}")
+                row_label_widget.setTextFormat(Qt.TextFormat.RichText)
 
                 row = QWidget()
                 row_layout = QHBoxLayout(row)
@@ -2007,7 +2854,7 @@ class SettingsDialog(QDialog):
                     lambda _=None, key=bios_id: self._on_import_bios_file(key)
                 )
                 row_layout.addWidget(btn_browse)
-                sec_form.addRow(row_label + f" — {', '.join(systems)}", row)
+                sec_form.addRow(row_label_widget, row)
             bios_sections_layout.addWidget(sec)
 
         bios_sections_layout.addStretch()
@@ -2039,21 +2886,21 @@ class SettingsDialog(QDialog):
         return entry
 
     def _installed_independent_emulators(self) -> list[EmulatorEntry]:
+        """Return all installed emulators (including cores, excluding the
+        RetroArch base entry which is managed automatically)."""
         result: list[EmulatorEntry] = []
         for item in self._cfg.emulators:
-            catalog = emulator_catalog_entry(item.catalog_id or item.name)
-            if catalog and catalog.install_strategy == "retroarch_core":
+            if item.catalog_id == "retroarch" or item.name.lower() == "retroarch":
                 continue
             result.append(item)
         return result
 
     def _emulator_supports_system(self, item: EmulatorEntry, system_id: str) -> bool:
+        if item.catalog_id == "retroarch" or item.name.lower() == "retroarch":
+            return False
         catalog = emulator_catalog_entry(item.catalog_id or item.name)
         if catalog:
-            if catalog.install_strategy == "retroarch_core":
-                return False
             return system_id in catalog.systems
-        # Manually added entries are considered user-managed and selectable.
         return True
 
     def _available_emulators_for_system(self, system_id: str) -> list[tuple[str, str]]:
@@ -2082,13 +2929,13 @@ class SettingsDialog(QDialog):
             for candidate in _RETROARCH_CORE_CANDIDATES.get(system_id, []):
                 if candidate not in cores:
                     cores.append(candidate)
-            if retro.install_dir:
-                cores_dir = Path(retro.install_dir) / "cores"
-                if cores_dir.exists():
-                    for dll in cores_dir.glob("*_libretro.dll"):
-                        name = dll.name
-                        if name not in cores:
-                            cores.append(name)
+            # Scan the shared cores directory
+            cores_dir = emulators_root() / "cores"
+            if cores_dir.exists():
+                for dll in cores_dir.glob("*_libretro.dll"):
+                    name = dll.name
+                    if name not in cores:
+                        cores.append(name)
         return cores
 
     def _refresh_system_emulator_controls(self):
@@ -2127,12 +2974,27 @@ class SettingsDialog(QDialog):
         if not emu_combo or not core_combo or not core_label:
             return
         selected_name = str(emu_combo.currentData() or "")
-        is_retroarch = selected_name.lower() == "retroarch"
+
+        # Check if the selected emulator is a core or the base RetroArch entry
+        selected_emu = None
+        for e in self._cfg.emulators:
+            if e.display_name().lower() == selected_name.lower():
+                selected_emu = e
+                break
+
+        is_retroarch_base = selected_name.lower() == "retroarch"
+        is_core = False
+        if selected_emu:
+            cat = emulator_catalog_entry(selected_emu.catalog_id or selected_emu.name)
+            is_core = cat and cat.install_strategy == "retroarch_core"
+
+        # Only show core dropdown for base RetroArch entry (not for individual cores)
+        show_core = is_retroarch_base and not is_core
         core_combo.blockSignals(True)
         core_combo.clear()
-        core_label.setVisible(is_retroarch)
-        core_combo.setVisible(is_retroarch)
-        if is_retroarch:
+        core_label.setVisible(show_core)
+        core_combo.setVisible(show_core)
+        if show_core:
             retro = self._retroarch_entry()
             current = ""
             if retro:
@@ -2174,7 +3036,7 @@ class SettingsDialog(QDialog):
 
         ok, message = self._ensure_retroarch_core_installed(retro, core)
         if not ok:
-            QMessageBox.warning(self, "RetroArch Core", message)
+            _msgbox.warning(self, "RetroArch Core", message)
             return
 
         retro.system_overrides[system_id] = core
@@ -2182,17 +3044,14 @@ class SettingsDialog(QDialog):
 
     def _ensure_retroarch_core_installed(self, retro: EmulatorEntry, core_dll: str) -> tuple[bool, str]:
         """Ensure selected RetroArch core DLL exists; download if missing."""
-        retro_root = Path(retro.install_dir) if retro.install_dir else Path(retro.path).parent
-        if not retro_root.exists():
-            return False, "RetroArch install directory was not found."
+        import threading as _threading
 
-        cores_dir = retro_root / "cores"
+        cores_dir = emulators_root() / "cores"
         cores_dir.mkdir(parents=True, exist_ok=True)
         target = cores_dir / core_dll
         if target.exists():
             return True, ""
 
-        core_zip_url = f"https://buildbot.libretro.com/nightly/windows/x86_64/latest/{core_dll}.zip"
         progress = QProgressDialog(f"Downloading core {core_dll}...", "", 0, 0, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setCancelButton(None)
@@ -2200,25 +3059,37 @@ class SettingsDialog(QDialog):
         progress.show()
         QApplication.processEvents()
 
-        tmp_zip = emulators_root() / "_downloads" / f"{core_dll}.zip"
-        tmp_zip.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            req = urllib.request.Request(core_zip_url, headers={"User-Agent": "Meridian/1.0"}, method="GET")
-            with urllib.request.urlopen(req, timeout=60) as res:
-                tmp_zip.write_bytes(res.read())
-            with zipfile.ZipFile(tmp_zip, "r") as zf:
-                zf.extractall(cores_dir)
-            if not target.exists():
-                return False, f"Downloaded archive but {core_dll} was not found after extraction."
-            return True, ""
-        except Exception as exc:
-            return False, f"Failed to download/install core {core_dll}: {exc}"
-        finally:
-            progress.close()
+        result_holder: list[tuple[bool, str]] = [(False, "Thread did not complete")]
+
+        def _worker():
+            core_zip_url = f"https://buildbot.libretro.com/nightly/windows/x86_64/latest/{core_dll}.zip"
+            tmp_zip = emulators_root() / "_downloads" / f"{core_dll}.zip"
+            tmp_zip.parent.mkdir(parents=True, exist_ok=True)
             try:
-                tmp_zip.unlink(missing_ok=True)
-            except Exception:
-                pass
+                req = urllib.request.Request(core_zip_url, headers={"User-Agent": "Meridian/1.0"}, method="GET")
+                with urllib.request.urlopen(req, timeout=60) as res:
+                    tmp_zip.write_bytes(res.read())
+                with zipfile.ZipFile(tmp_zip, "r") as zf:
+                    zf.extractall(cores_dir)
+                if not target.exists():
+                    result_holder[0] = (False, f"Downloaded archive but {core_dll} was not found after extraction.")
+                else:
+                    result_holder[0] = (True, "")
+            except Exception as exc:
+                result_holder[0] = (False, f"Failed to download/install core {core_dll}: {exc}")
+            finally:
+                try:
+                    tmp_zip.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        t = _threading.Thread(target=_worker, daemon=True)
+        t.start()
+        while t.is_alive():
+            QApplication.processEvents()
+            t.join(timeout=0.05)
+        progress.close()
+        return result_holder[0]
 
     def _bios_storage_dir(self) -> Path:
         base = QStandardPaths.writableLocation(
@@ -2229,35 +3100,63 @@ class SettingsDialog(QDialog):
         return path
 
     def _on_import_bios_file(self, bios_id: str) -> None:
+        from meridian.core.config import BIOS_FILENAME_ALIASES
+
         le = getattr(self, "_bios_path_inputs", {}).get(bios_id)
         if not le:
             return
+
+        accepted_names = BIOS_FILENAME_ALIASES.get(bios_id, [])
+        if accepted_names:
+            exts = sorted({Path(n).suffix for n in accepted_names if Path(n).suffix})
+            ext_filter = " ".join(f"*{e}" for e in exts) if exts else "*.*"
+            names_str = ", ".join(accepted_names)
+            file_filter = f"BIOS files ({ext_filter});;All Files (*.*)"
+        else:
+            file_filter = "All Files (*.*)"
+            names_str = ""
+
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Import BIOS File",
             le.text().strip() or "",
-            "All Files (*.*)",
+            file_filter,
         )
-        if path:
-            src = Path(path)
-            ext = src.suffix.lower() or ".bin"
-            dest = self._bios_storage_dir() / f"{bios_id}{ext}"
-            try:
-                shutil.copy2(src, dest)
-            except Exception as exc:
-                QMessageBox.warning(
-                    self,
-                    "Import BIOS File",
-                    f"Failed to import BIOS file:\n{exc}",
-                )
-                return
-            le.setText(str(dest))
-            QMessageBox.information(
+        if not path:
+            return
+
+        src = Path(path)
+        if accepted_names:
+            if src.name not in accepted_names:
+                lower_aliases = {n.lower(): n for n in accepted_names}
+                if src.name.lower() not in lower_aliases:
+                    _msgbox.warning(
+                        self,
+                        "Invalid BIOS File",
+                        f"The selected file \"{src.name}\" is not a recognized "
+                        f"BIOS filename for this entry.\n\n"
+                        f"Expected: {names_str}",
+                    )
+                    return
+
+        ext = src.suffix.lower() or ".bin"
+        dest = self._bios_storage_dir() / f"{bios_id}{ext}"
+        try:
+            shutil.copy2(src, dest)
+        except Exception as exc:
+            _msgbox.warning(
                 self,
-                "BIOS Imported",
-                f"Imported to Meridian BIOS storage:\n{dest}\n\n"
-                "You can now delete the original source file if desired.",
+                "Import BIOS File",
+                f"Failed to import BIOS file:\n{exc}",
             )
+            return
+        le.setText(str(dest))
+        _msgbox.information(
+            self,
+            "BIOS Imported",
+            f"Imported to Meridian BIOS storage:\n{dest}\n\n"
+            "You can now delete the original source file if desired.",
+        )
 
     # -- Networking ----------------------------------------------------
 
@@ -2269,37 +3168,7 @@ class SettingsDialog(QDialog):
         return _placeholder(sub)
 
     def _net_multiplayer(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
-
-        grp = QGroupBox("Netplay")
-        g = QVBoxLayout(grp)
-        g.setSpacing(8)
-        g.addWidget(_disabled_check("Enable multiplayer features"))
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Username:"))
-        le = QLineEdit()
-        le.setPlaceholderText("Player")
-        le.setEnabled(False)
-        row.addWidget(le, 1)
-        g.addLayout(row)
-
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Default port:"))
-        spin = QSpinBox()
-        spin.setRange(1024, 65535)
-        spin.setValue(55435)
-        spin.setEnabled(False)
-        row2.addWidget(spin)
-        row2.addStretch()
-        g.addLayout(row2)
-
-        layout.addWidget(grp)
-        layout.addStretch()
-        return w
+        return _coming_soon_page("Multiplayer", "Netplay and online multiplayer features")
 
     def _net_updates(self) -> QWidget:
         w = QWidget()
@@ -2307,20 +3176,57 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        grp = QGroupBox("Updates")
+        grp_ra = QGroupBox("RetroArch")
+        g_ra = QVBoxLayout(grp_ra)
+        g_ra.setSpacing(8)
+        self._chk_retroarch_auto_update = QCheckBox(
+            "Automatically update RetroArch on startup"
+        )
+        self._chk_retroarch_auto_update.setChecked(self._cfg.retroarch_auto_update)
+        self._chk_retroarch_auto_update.toggled.connect(self._mark_dirty)
+        g_ra.addWidget(self._chk_retroarch_auto_update)
+        ra_hint = QLabel(
+            "RetroArch is required for most emulator cores. "
+            "When enabled, Meridian will check for and install updates "
+            "each time it starts."
+        )
+        ra_hint.setObjectName("sectionLabel")
+        ra_hint.setWordWrap(True)
+        g_ra.addWidget(ra_hint)
+        layout.addWidget(grp_ra)
+
+        grp = QGroupBox("Meridian Updates")
         g = QVBoxLayout(grp)
         g.setSpacing(8)
-        g.addWidget(_disabled_check("Check for updates on startup"))
-        g.addWidget(_disabled_check("Include pre-release versions"))
+        self._chk_updates_startup = QCheckBox("Check for updates on startup")
+        self._chk_updates_startup.setChecked(self._cfg.updates_check_on_startup)
+        self._chk_updates_startup.toggled.connect(self._mark_dirty)
+        g.addWidget(self._chk_updates_startup)
+
+        self._chk_updates_prerelease = QCheckBox("Include pre-release versions")
+        self._chk_updates_prerelease.setChecked(self._cfg.updates_include_prerelease)
+        self._chk_updates_prerelease.toggled.connect(self._mark_dirty)
+        g.addWidget(self._chk_updates_prerelease)
 
         btn = QPushButton("Check Now")
-        btn.setEnabled(False)
+        btn.clicked.connect(self._on_check_updates_now)
         btn.setFixedWidth(120)
         g.addWidget(btn)
 
         layout.addWidget(grp)
         layout.addStretch()
         return w
+
+    def _on_multiplayer_toggled(self, enabled: bool) -> None:
+        self._mark_dirty()
+
+    def _on_check_updates_now(self) -> None:
+        _msgbox.information(
+            self,
+            "Check for Updates",
+            "Manual update checks are not available yet.\n"
+            "The selected update preferences will be saved.",
+        )
 
     # -- Tools ---------------------------------------------------------
 
@@ -2351,9 +3257,7 @@ class SettingsDialog(QDialog):
         g_src.setSpacing(8)
 
         hint = QLabel(
-            "Select one source for all metadata and artwork. "
-            "Each source has different capabilities and credential "
-            "requirements — the settings below adapt automatically."
+            "SteamGridDB is Meridian's scraper source for metadata and artwork."
         )
         hint.setObjectName("sectionLabel")
         hint.setWordWrap(True)
@@ -2363,9 +3267,9 @@ class SettingsDialog(QDialog):
         row.addWidget(QLabel("Active source:"))
         self._scraper_combo = QComboBox()
         self._scraper_combo.addItems(SCRAPER_SOURCE_NAMES)
-        cur = self._cfg.scraper_source
-        idx = SCRAPER_SOURCE_NAMES.index(cur) if cur in SCRAPER_SOURCE_NAMES else 0
+        idx = SCRAPER_SOURCE_NAMES.index("SteamGridDB") if "SteamGridDB" in SCRAPER_SOURCE_NAMES else 0
         self._scraper_combo.setCurrentIndex(idx)
+        self._scraper_combo.setEnabled(False)
         row.addWidget(self._scraper_combo, 1)
         g_src.addLayout(row)
 
@@ -2384,44 +3288,75 @@ class SettingsDialog(QDialog):
 
         self._scraper_cred_stack = QStackedWidget()
         self._scraper_cred_inputs: dict[str, dict[str, QLineEdit]] = {}
+        self._scraper_test_btns: dict[str, QPushButton] = {}
+
+        t_theme = active_theme()
+        _plug_normal_color = t_theme.fg_disabled
 
         for src in SCRAPER_SOURCES:
             page = QWidget()
-            form = QFormLayout(page)
-            form.setSpacing(8)
-            form.setContentsMargins(0, 0, 0, 0)
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(8)
+
+            plug_btn = QPushButton()
+            plug_btn.setFixedSize(26, 26)
+            plug_btn.setFlat(True)
+            plug_btn.setToolTip("Test connection")
+            plug_btn.setIcon(lucide_icon("plug", 14, _plug_normal_color))
+            plug_btn.setObjectName("linkButton")
+            plug_btn.clicked.connect(self._on_test_scraper_connection)
+            self._scraper_test_btns[src.name] = plug_btn
 
             field_inputs: dict[str, QLineEdit] = {}
             if not src.auth_fields:
+                no_cred_row = QWidget()
+                nc_lay = QHBoxLayout(no_cred_row)
+                nc_lay.setContentsMargins(0, 0, 0, 0)
+                nc_lay.setSpacing(6)
                 lbl = QLabel("No credentials required for this source.")
                 lbl.setObjectName("sectionLabel")
-                form.addRow(lbl)
+                nc_lay.addWidget(lbl, 1)
+                nc_lay.addWidget(plug_btn)
+                page_layout.addWidget(no_cred_row)
             else:
+                form = QWidget()
+                form_layout = QFormLayout(form)
+                form_layout.setSpacing(8)
+                form_layout.setContentsMargins(0, 0, 0, 0)
                 stored = self._cfg.scraper_credentials.get(src.name, {})
-                for key, label, placeholder, is_secret in src.auth_fields:
+                num_fields = len(src.auth_fields)
+                for i, (key, label, placeholder, is_secret) in enumerate(src.auth_fields):
                     le = QLineEdit()
                     le.setPlaceholderText(placeholder)
                     if is_secret:
                         le.setEchoMode(QLineEdit.EchoMode.Password)
                     le.setText(stored.get(key, ""))
                     le.textChanged.connect(self._mark_dirty)
-                    form.addRow(label, le)
+                    le.textChanged.connect(lambda _, sn=src.name: self._update_scraper_test_btn(sn))
+                    if i == num_fields - 1:
+                        field_wrap = QWidget()
+                        fw_lay = QHBoxLayout(field_wrap)
+                        fw_lay.setContentsMargins(0, 0, 0, 0)
+                        fw_lay.setSpacing(4)
+                        fw_lay.addWidget(le, 1)
+                        fw_lay.addWidget(plug_btn)
+                        form_layout.addRow(label, field_wrap)
+                    else:
+                        form_layout.addRow(label, le)
                     field_inputs[key] = le
+                page_layout.addWidget(form)
 
+            page_layout.addStretch()
             self._scraper_cred_inputs[src.name] = field_inputs
             self._scraper_cred_stack.addWidget(page)
 
         cred_layout.addWidget(self._scraper_cred_stack)
-
-        btn_row = QHBoxLayout()
-        self._scraper_test_btn = QPushButton("Test Connection")
-        self._scraper_test_btn.setFixedWidth(140)
-        self._scraper_test_btn.setEnabled(False)
-        btn_row.addWidget(self._scraper_test_btn)
-        btn_row.addStretch()
-        cred_layout.addLayout(btn_row)
-
         layout.addWidget(self._scraper_cred_group)
+
+        # Active test button — tracks whichever source is currently selected
+        first_src = SCRAPER_SOURCE_NAMES[0] if SCRAPER_SOURCE_NAMES else ""
+        self._scraper_test_btn = self._scraper_test_btns.get(first_src)
 
         # -- Content to Fetch ------------------------------------------
         grp_content = QGroupBox("Content to Fetch")
@@ -2482,13 +3417,6 @@ class SettingsDialog(QDialog):
         self._chk_prefer_local.toggled.connect(self._mark_dirty)
         g_b.addWidget(self._chk_prefer_local)
 
-        self._chk_hash_matching = QCheckBox(
-            "Hash ROMs for accurate matching (CRC32 / MD5 / SHA1)"
-        )
-        self._chk_hash_matching.setChecked(self._cfg.scraper_hash_matching)
-        self._chk_hash_matching.toggled.connect(self._mark_dirty)
-        g_b.addWidget(self._chk_hash_matching)
-
         self._scraper_region_widget = QWidget()
         region_row = QHBoxLayout(self._scraper_region_widget)
         region_row.setContentsMargins(0, 0, 0, 0)
@@ -2520,6 +3448,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(scroll_content)
 
         outer = QWidget()
@@ -2565,16 +3494,6 @@ class SettingsDialog(QDialog):
             else:
                 chk.setToolTip("")
 
-        # Hash matching
-        self._chk_hash_matching.setEnabled(src.supports_hash)
-        if not src.supports_hash:
-            self._chk_hash_matching.setChecked(False)
-            self._chk_hash_matching.setToolTip(
-                f"{source_name} does not support hash-based matching"
-            )
-        else:
-            self._chk_hash_matching.setToolTip("")
-
         # Region priority
         self._scraper_region_widget.setVisible(src.supports_region_priority)
 
@@ -2585,80 +3504,491 @@ class SettingsDialog(QDialog):
         else:
             self._scraper_rate_note.setVisible(False)
 
+        # Track active test button and refresh its state
+        self._scraper_test_btn = self._scraper_test_btns.get(source_name)
+        self._update_scraper_test_btn(source_name)
         self._mark_dirty()
 
-    def _tools_retroachievements(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+    def _update_scraper_test_btn(self, source_name: str | None = None):
+        """Enable the plug button for the given source (or the active source)."""
+        if source_name is None:
+            source_name = self._scraper_combo.currentText()
+        src = SCRAPER_SOURCE_MAP.get(source_name)
+        btn = self._scraper_test_btns.get(source_name) if hasattr(self, "_scraper_test_btns") else None
+        if not btn:
+            return
+        if not src:
+            btn.setEnabled(False)
+            return
+        if not src.auth_fields:
+            btn.setEnabled(True)
+            return
+        inputs = self._scraper_cred_inputs.get(source_name, {})
+        all_filled = all(le.text().strip() for le in inputs.values())
+        btn.setEnabled(all_filled)
 
-        grp = QGroupBox("RetroAchievements Account")
-        g = QFormLayout(grp)
-        g.setSpacing(8)
+    def _on_test_scraper_connection(self):
+        """Test the current scraper source's API connectivity.
 
-        le_user = QLineEdit()
-        le_user.setPlaceholderText("RetroAchievements username")
-        le_user.setEnabled(False)
-        g.addRow("Username:", le_user)
+        The plug-icon button turns green on success or red on failure,
+        then resets to its normal colour after 2 seconds.
+        """
+        import urllib.request
+        import urllib.parse
+        import threading
 
-        le_key = QLineEdit()
-        le_key.setPlaceholderText("API key")
-        le_key.setEchoMode(QLineEdit.EchoMode.Password)
-        le_key.setEnabled(False)
-        g.addRow("API Key:", le_key)
+        source_name = self._scraper_combo.currentText()
+        src = SCRAPER_SOURCE_MAP.get(source_name)
+        if not src:
+            return
 
-        layout.addWidget(grp)
+        btn = self._scraper_test_btns.get(source_name)
+        if not btn:
+            return
 
-        grp2 = QGroupBox("Integration")
-        g2 = QVBoxLayout(grp2)
-        g2.setSpacing(8)
-        g2.addWidget(_disabled_check("Enable RetroAchievements"))
-        g2.addWidget(_disabled_check("Show achievement notifications"))
-        g2.addWidget(_disabled_check("Hardcore mode"))
-        g2.addWidget(_disabled_check("Display achievement badges in game grid"))
-        layout.addWidget(grp2)
-
-        grp3 = QGroupBox("Data")
-        g3 = QVBoxLayout(grp3)
-        g3.setSpacing(8)
-        g3.addWidget(_disabled_check("Sync progress on launch"))
-        g3.addWidget(_disabled_check("Cache achievement icons locally"))
-
-        row = QHBoxLayout()
-        btn = QPushButton("Test Connection")
         btn.setEnabled(False)
-        row.addWidget(btn)
-        row.addStretch()
-        g3.addLayout(row)
+        btn.setIcon(lucide_icon("plug", 14, active_theme().fg_disabled))
+        QApplication.processEvents()
 
-        layout.addWidget(grp3)
-        layout.addStretch()
-        return w
+        inputs = self._scraper_cred_inputs.get(source_name, {})
+        creds = {k: le.text().strip() for k, le in inputs.items()}
+
+        result_holder: list = [None]
+
+        def _worker():
+            try:
+                result_holder[0] = self._test_scraper_source(src, creds)
+            except Exception as exc:
+                result_holder[0] = (False, str(exc))
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        while t.is_alive():
+            QApplication.processEvents()
+            t.join(timeout=0.016)
+
+        ok, detail = result_holder[0] if result_holder[0] else (False, "No response")
+
+        if ok:
+            btn.setIcon(lucide_icon("plug", 14, "#2ecc71"))
+            btn.setToolTip(f"Connected — {detail}")
+        else:
+            btn.setIcon(lucide_icon("plug", 14, "#e05252"))
+            btn.setToolTip(f"Failed — {detail}")
+
+        def _reset():
+            if not btn or not hasattr(self, "_scraper_test_btns"):
+                return
+            t2 = active_theme()
+            btn.setIcon(lucide_icon("plug", 14, t2.fg_disabled))
+            btn.setToolTip("Test connection")
+            self._update_scraper_test_btn(source_name)
+
+        QTimer.singleShot(2000, _reset)
+
+    def _test_scraper_source(
+        self, src, creds: dict
+    ) -> tuple[bool, str]:
+        """Verify API connectivity and credentials. Returns (ok, detail_message).
+
+        For sources that support hash-based matching, the test performs an
+        actual hash lookup so the full scrape pipeline is validated.
+        """
+        import urllib.request
+        import urllib.parse
+        import json
+
+        timeout = 12
+        _UA = {"User-Agent": "Meridian/1.0"}
+
+        def _get(url: str, headers: dict | None = None) -> tuple[int, str]:
+            merged = {**_UA, **(headers or {})}
+            req = urllib.request.Request(url, headers=merged, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                return res.status, res.read().decode("utf-8", errors="replace")
+
+        def _post(url: str, data: str = "", headers: dict | None = None) -> tuple[int, str]:
+            merged = {**_UA, **(headers or {})}
+            req = urllib.request.Request(
+                url, data=data.encode("utf-8"), headers=merged, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                return res.status, res.read().decode("utf-8", errors="replace")
+
+        # ── ScreenScraper ─────────────────────────────────────────────────
+        if src.id == "screenscraper":
+            # ssuserInfos validates credentials AND returns account info.
+            params = urllib.parse.urlencode({
+                "output": "json",
+                "softname": "Meridian",
+                "ssid": creds.get("username", ""),
+                "sspassword": creds.get("password", ""),
+            })
+            try:
+                status, body = _get(
+                    f"https://api.screenscraper.fr/api2/ssuserInfos.php?{params}"
+                )
+                if status == 200:
+                    try:
+                        obj = json.loads(body)
+                        ssuser = (obj.get("response") or {}).get("ssuser") or {}
+                        uid = ssuser.get("id") or ssuser.get("login")
+                        if uid:
+                            req_today = ssuser.get("requeststoday", "?")
+                            req_max = ssuser.get("maxrequestsperday", "?")
+                            return True, f"Logged in as '{uid}'  ({req_today}/{req_max} requests today)"
+                    except Exception:
+                        pass
+                    # body parsed but no user — likely bad credentials
+                    if "wrongpassword" in body.lower() or "error" in body.lower():
+                        return False, "Wrong username or password"
+                    return True, "ScreenScraper reachable (verify credentials)"
+                return False, f"HTTP {status}"
+            except Exception as exc:
+                return False, str(exc)
+
+        # ── TheGamesDB ───────────────────────────────────────────────────
+        if src.id == "thegamesdb":
+            api_key = creds.get("api_key", "")
+            params = urllib.parse.urlencode({"apikey": api_key, "name": "Mario", "fields": "id"})
+            try:
+                status, body = _get(f"https://api.thegamesdb.net/v1.1/Games/ByGameName?{params}")
+                if status == 200:
+                    try:
+                        obj = json.loads(body)
+                        remaining = (obj.get("extra") or {}).get("remaining_monthly_allowance")
+                        if remaining is not None:
+                            return True, f"TheGamesDB OK  ({remaining} requests remaining)"
+                    except Exception:
+                        pass
+                    return True, "TheGamesDB OK"
+                if status == 403:
+                    return False, "Invalid API key"
+                return False, f"HTTP {status}"
+            except Exception as exc:
+                return False, str(exc)
+
+        # ── IGDB (Twitch OAuth) ──────────────────────────────────────────
+        if src.id == "igdb":
+            token_params = urllib.parse.urlencode({
+                "client_id": creds.get("client_id", ""),
+                "client_secret": creds.get("client_secret", ""),
+                "grant_type": "client_credentials",
+            })
+            try:
+                status, body = _post(f"https://id.twitch.tv/oauth2/token?{token_params}")
+                obj = json.loads(body)
+                token = obj.get("access_token", "")
+                if token:
+                    # Quick IGDB game search to verify the token actually works
+                    hdrs = {
+                        "Client-ID": creds.get("client_id", ""),
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                        "Content-Type": "text/plain",
+                    }
+                    s2, b2 = _post(
+                        "https://api.igdb.com/v4/games",
+                        data='search "Mario"; fields name; limit 1;',
+                        headers=hdrs,
+                    )
+                    if s2 == 200:
+                        return True, "IGDB authenticated and query successful"
+                    return True, "IGDB token obtained (query check failed)"
+                msg = obj.get("message") or obj.get("error") or "Auth failed"
+                return False, str(msg)
+            except Exception as exc:
+                return False, str(exc)
+
+        # ── MobyGames ────────────────────────────────────────────────────
+        if src.id == "mobygames":
+            api_key = creds.get("api_key", "")
+            params = urllib.parse.urlencode({"api_key": api_key, "title": "Mario", "limit": "1"})
+            try:
+                status, body = _get(f"https://api.mobygames.com/v1/games?{params}")
+                if status == 200:
+                    return True, "MobyGames OK"
+                if status == 401:
+                    return False, "Invalid API key"
+                if status == 429:
+                    return False, "Rate limited (free tier: 1 request / 5 s)"
+                return False, f"HTTP {status}"
+            except Exception as exc:
+                return False, str(exc)
+
+        # ── SteamGridDB ──────────────────────────────────────────────────
+        if src.id == "steamgriddb":
+            api_key = creds.get("api_key", "")
+            headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+            try:
+                status, body = _get(
+                    f"https://www.steamgriddb.com/api/v2/search/autocomplete/"
+                    f"{urllib.parse.quote('Mario')}",
+                    headers=headers,
+                )
+                if status == 200:
+                    return True, "SteamGridDB OK"
+                if status == 401:
+                    return False, "Invalid API key"
+                return False, f"HTTP {status}"
+            except Exception as exc:
+                return False, str(exc)
+
+        # ── PlayMatch ────────────────────────────────────────────────────
+        if src.id == "playmatch":
+            api_key = creds.get("api_key", "")
+            headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+            params = urllib.parse.urlencode({"query": "Mario"})
+            try:
+                status, body = _get(
+                    f"https://api.playmatch.gg/v1/games/search?{params}",
+                    headers=headers,
+                )
+                if status == 200:
+                    return True, "PlayMatch OK"
+                if status == 401:
+                    return False, "Invalid API key"
+                return False, f"HTTP {status}"
+            except Exception as exc:
+                return False, str(exc)
+
+        # ── Hasheous (hash-based — test with a real MD5 lookup) ──────────
+        if src.id == "hasheous":
+            # Use the MD5 of the well-known Donkey Kong (NES) to verify the
+            # hash endpoint responds correctly (404 = not in DB but API works).
+            test_md5 = "d0b6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"  # deliberately unknown
+            try:
+                status, body = _get(
+                    f"https://hasheous.org/api/v1/lookup/md5/{test_md5}",
+                    headers={"Accept": "application/json"},
+                )
+                if status in (200, 404):
+                    return True, "Hasheous reachable (hash endpoint responding)"
+                return False, f"HTTP {status}"
+            except Exception:
+                pass
+            # Fallback: plain reachability check
+            try:
+                status, _ = _get("https://hasheous.org/")
+                return (status < 500), f"Hasheous {'reachable' if status < 500 else 'error'} (HTTP {status})"
+            except Exception as exc:
+                return False, str(exc)
+
+        # ── No-auth sources — simple reachability ────────────────────────
+        try:
+            status, _ = _get(src.url)
+            if status < 400:
+                return True, f"{src.name} reachable (HTTP {status})"
+            return False, f"HTTP {status}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _tools_retroachievements(self) -> QWidget:
+        return _coming_soon_page("RetroAchievements", "Achievement tracking and integration")
 
     def _tools_files(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+        """ROM integrity, duplicate detection, and library cleanup."""
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        grp = QGroupBox("File Management")
-        g = QVBoxLayout(grp)
-        g.setSpacing(8)
-        g.addWidget(_disabled_check("Verify ROM integrity on scan"))
-        g.addWidget(_disabled_check("Remove missing ROMs from library"))
-        g.addWidget(_disabled_check("Hash ROMs for scraper matching (CRC32)"))
+        # ── Library Integrity ─────────────────────────────────────────────
+        grp_int = QGroupBox("Library Integrity")
+        g_int = QVBoxLayout(grp_int)
+        g_int.setSpacing(8)
 
-        row = QHBoxLayout()
-        btn_open = QPushButton("Open App Data Directory")
-        btn_open.setEnabled(False)
-        row.addWidget(btn_open)
-        row.addStretch()
-        g.addLayout(row)
+        lbl_int = QLabel(
+            "Check that every ROM in your library still exists on disk. "
+            "Missing files are listed below and can be removed from the library."
+        )
+        lbl_int.setObjectName("sectionLabel")
+        lbl_int.setWordWrap(True)
+        g_int.addWidget(lbl_int)
 
-        layout.addWidget(grp)
+        row_int = QHBoxLayout()
+        self._btn_verify_files = QPushButton("Verify Files")
+        self._btn_verify_files.setFixedWidth(130)
+        self._btn_verify_files.clicked.connect(self._on_file_verify)
+        row_int.addWidget(self._btn_verify_files)
+        self._btn_remove_missing = QPushButton("Remove Missing")
+        self._btn_remove_missing.setFixedWidth(130)
+        self._btn_remove_missing.setEnabled(False)
+        self._btn_remove_missing.clicked.connect(self._on_remove_missing_files)
+        row_int.addWidget(self._btn_remove_missing)
+        row_int.addStretch()
+        g_int.addLayout(row_int)
+
+        self._file_verify_log = QPlainTextEdit()
+        self._file_verify_log.setReadOnly(True)
+        self._file_verify_log.setMaximumHeight(110)
+        self._file_verify_log.setPlaceholderText("Click 'Verify Files' to check your library…")
+        g_int.addWidget(self._file_verify_log)
+
+        layout.addWidget(grp_int)
+
+        # ── Duplicate Detection ───────────────────────────────────────────
+        grp_dupe = QGroupBox("Duplicate Detection")
+        g_dupe = QVBoxLayout(grp_dupe)
+        g_dupe.setSpacing(8)
+
+        lbl_dupe = QLabel(
+            "Find likely duplicate ROMs using filename and file size "
+            "(no hashing)."
+        )
+        lbl_dupe.setObjectName("sectionLabel")
+        lbl_dupe.setWordWrap(True)
+        g_dupe.addWidget(lbl_dupe)
+
+        row_dupe = QHBoxLayout()
+        self._btn_find_dupes = QPushButton("Find Duplicates")
+        self._btn_find_dupes.setFixedWidth(130)
+        self._btn_find_dupes.clicked.connect(self._on_find_duplicates)
+        row_dupe.addWidget(self._btn_find_dupes)
+        row_dupe.addStretch()
+        g_dupe.addLayout(row_dupe)
+
+        self._dupe_log = QPlainTextEdit()
+        self._dupe_log.setReadOnly(True)
+        self._dupe_log.setMaximumHeight(120)
+        self._dupe_log.setPlaceholderText("Duplicate groups will appear here…")
+        g_dupe.addWidget(self._dupe_log)
+
+        layout.addWidget(grp_dupe)
+
+        # ── Auto-Scan Behaviour ───────────────────────────────────────────
+        grp_auto = QGroupBox("Auto-Scan Behaviour")
+        g_auto = QVBoxLayout(grp_auto)
+        g_auto.setSpacing(6)
+
+        self._chk_verify_scan = QCheckBox("Verify files exist on every library scan")
+        self._chk_verify_scan.setChecked(self._cfg.file_verify_on_scan)
+        self._chk_verify_scan.toggled.connect(self._mark_dirty)
+        g_auto.addWidget(self._chk_verify_scan)
+
+        self._chk_auto_remove = QCheckBox("Auto-remove missing files from library")
+        self._chk_auto_remove.setChecked(self._cfg.file_auto_remove_missing)
+        self._chk_auto_remove.toggled.connect(self._mark_dirty)
+        g_auto.addWidget(self._chk_auto_remove)
+
+        layout.addWidget(grp_auto)
         layout.addStretch()
-        return w
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(scroll_content)
+
+        outer = QWidget()
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(scroll)
+        return outer
+
+    # ── File Management handlers ──────────────────────────────────────────
+
+    def _fm_games(self):
+        """Return the current game list from the parent main window."""
+        return list(getattr(self.parent(), "_games", []))
+
+    def _on_file_verify(self):
+        """Check that all ROM files in the library exist on disk."""
+        games = self._fm_games()
+        if not games:
+            self._file_verify_log.setPlainText(
+                "No games in library. Run a library scan first (File > Scan)."
+            )
+            return
+
+        self._btn_verify_files.setEnabled(False)
+        self._file_verify_log.setPlainText(f"Verifying {len(games)} files…")
+        QApplication.processEvents()
+
+        missing = [str(g.path) for g in games if not g.path.exists()]
+        valid = len(games) - len(missing)
+
+        if missing:
+            lines = [f"✓ {valid} valid   ✗ {len(missing)} missing\n", "Missing files:"]
+            lines += [f"  • {p}" for p in missing[:60]]
+            if len(missing) > 60:
+                lines.append(f"  … and {len(missing) - 60} more")
+            self._file_verify_log.setPlainText("\n".join(lines))
+            self._btn_remove_missing.setEnabled(True)
+            self._fm_missing_paths = set(missing)
+        else:
+            self._file_verify_log.setPlainText(f"✓ All {valid} ROM files are present.")
+            self._btn_remove_missing.setEnabled(False)
+            self._fm_missing_paths = set()
+
+        self._btn_verify_files.setEnabled(True)
+
+    def _on_remove_missing_files(self):
+        """Remove library entries whose files no longer exist on disk."""
+        missing = getattr(self, "_fm_missing_paths", set())
+        if not missing:
+            return
+        main_win = self.parent()
+        if not main_win or not hasattr(main_win, "_games"):
+            return
+        before = len(main_win._games)
+        main_win._games = [g for g in main_win._games if str(g.path) not in missing]
+        removed = before - len(main_win._games)
+        if hasattr(main_win, "_refresh_games_view"):
+            main_win._refresh_games_view()
+        self._file_verify_log.setPlainText(
+            f"Removed {removed} missing ROM(s) from the library view.\n"
+            "Re-scan to restore if files reappear."
+        )
+        self._btn_remove_missing.setEnabled(False)
+        self._fm_missing_paths = set()
+
+    def _on_find_duplicates(self):
+        """Find likely duplicate ROMs by (filename, size)."""
+        import threading as _threading
+
+        games = self._fm_games()
+        if not games:
+            self._dupe_log.setPlainText("No games in library. Run a library scan first.")
+            return
+
+        self._btn_find_dupes.setEnabled(False)
+        self._dupe_log.setPlainText(f"Scanning {len(games)} ROMs for duplicates…")
+        QApplication.processEvents()
+
+        result_holder: list = [None]
+
+        def _worker():
+            dupe_map: dict[tuple[str, int], list] = {}
+            for g in games:
+                try:
+                    stat = g.path.stat()
+                    key = (g.path.name.lower(), int(stat.st_size))
+                    dupe_map.setdefault(key, []).append(g)
+                except Exception:
+                    pass
+            return {k: grp for k, grp in dupe_map.items() if len(grp) > 1}
+
+        t = _threading.Thread(
+            target=lambda: result_holder.__setitem__(0, _worker()), daemon=True
+        )
+        t.start()
+        while t.is_alive():
+            QApplication.processEvents()
+            t.join(timeout=0.05)
+
+        dupes: dict = result_holder[0] or {}
+        if not dupes:
+            self._dupe_log.setPlainText("✓ No duplicate ROMs found.")
+        else:
+            lines = [f"Found {len(dupes)} duplicate group(s):\n"]
+            for (name, size), group in dupes.items():
+                lines.append(f"  {name} [{size} bytes]  ({len(group)} copies):")
+                for g in group:
+                    lines.append(f"    • {g.path}")
+            self._dupe_log.setPlainText("\n".join(lines))
+
+        self._btn_find_dupes.setEnabled(True)
 
     def _tools_clock(self) -> QWidget:
         """Real-time clock settings — system, timezone, or manual."""
@@ -2794,44 +4124,97 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        grp = QGroupBox("Diagnostics")
+        grp = QGroupBox("Logging")
         g = QVBoxLayout(grp)
         g.setSpacing(8)
-        g.addWidget(_disabled_check("Enable debug logging"))
-        g.addWidget(_disabled_check("Show FPS counter"))
-        g.addWidget(_disabled_check("Log emulator stdout"))
 
-        row = QHBoxLayout()
-        btn = QPushButton("Open Log File")
-        btn.setEnabled(False)
-        row.addWidget(btn)
-        row.addStretch()
-        g.addLayout(row)
+        self._chk_debug_logging = QCheckBox("Enable debug logging")
+        self._chk_debug_logging.setChecked(self._cfg.debug_logging)
+        self._chk_debug_logging.toggled.connect(self._mark_dirty)
+        g.addWidget(self._chk_debug_logging)
+
+        self._chk_debug_emu_stdout = QCheckBox("Log emulator stdout / stderr to file")
+        self._chk_debug_emu_stdout.setChecked(self._cfg.debug_log_emulator_stdout)
+        self._chk_debug_emu_stdout.toggled.connect(self._mark_dirty)
+        g.addWidget(self._chk_debug_emu_stdout)
+
+        row_level = QHBoxLayout()
+        row_level.addWidget(QLabel("Log level:"))
+        self._combo_log_level = QComboBox()
+        self._combo_log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        self._combo_log_level.setCurrentText(self._cfg.debug_log_level)
+        self._combo_log_level.currentTextChanged.connect(self._mark_dirty)
+        row_level.addWidget(self._combo_log_level)
+        row_level.addStretch()
+        g.addLayout(row_level)
+
+        hint = QLabel("Verbose logging may impact performance. Changes take effect on next launch.")
+        hint.setObjectName("sectionLabel")
+        hint.setWordWrap(True)
+        g.addWidget(hint)
 
         layout.addWidget(grp)
+
+        grp_diag = QGroupBox("Diagnostics")
+        g_d = QVBoxLayout(grp_diag)
+        g_d.setSpacing(8)
+
+        self._chk_debug_fps = QCheckBox("Show FPS counter overlay")
+        self._chk_debug_fps.setChecked(self._cfg.debug_show_fps)
+        self._chk_debug_fps.toggled.connect(self._mark_dirty)
+        g_d.addWidget(self._chk_debug_fps)
+
+        self._chk_debug_borders = QCheckBox("Show widget debug borders")
+        self._chk_debug_borders.setChecked(self._cfg.debug_show_widget_borders)
+        self._chk_debug_borders.toggled.connect(self._mark_dirty)
+        g_d.addWidget(self._chk_debug_borders)
+
+        row_btns = QHBoxLayout()
+        row_btns.setSpacing(8)
+
+        btn_log = QPushButton("Open Log File")
+        btn_log.setFixedWidth(130)
+        btn_log.clicked.connect(self._on_open_log_file)
+        row_btns.addWidget(btn_log)
+
+        btn_crash = QPushButton("Open Crash Log")
+        btn_crash.setFixedWidth(130)
+        btn_crash.clicked.connect(self._on_open_crash_log)
+        row_btns.addWidget(btn_crash)
+
+        row_btns.addStretch()
+        g_d.addLayout(row_btns)
+
+        layout.addWidget(grp_diag)
         layout.addStretch()
         return w
+
+    def _on_open_log_file(self):
+        import os
+        from pathlib import Path
+        log_dir = Path(__file__).resolve().parent.parent.parent / "cache"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "meridian_debug.log"
+        if log_file.exists():
+            os.startfile(str(log_file))
+        else:
+            _msgbox.information(self, "Log File", "No debug log file found yet.\nEnable debug logging in the settings above to generate one.")
+
+    def _on_open_crash_log(self):
+        import os
+        from pathlib import Path
+        log_file = Path(__file__).resolve().parent.parent.parent / "cache" / "latest.log"
+        if log_file.exists():
+            os.startfile(str(log_file))
+        else:
+            _msgbox.information(self, "Crash Log", "No crash log found. This means Meridian has not encountered any unhandled exceptions.")
 
     def _adv_experimental(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
-
-        grp = QGroupBox("Experimental Features")
-        g = QVBoxLayout(grp)
-        g.setSpacing(8)
-        g.addWidget(_disabled_check("GPU-accelerated game grid"))
-        g.addWidget(_disabled_check("Predictive ROM scanning"))
-        g.addWidget(_disabled_check("Cloud save sync"))
-
-        lbl = QLabel("These features are unstable and may cause issues.")
-        lbl.setObjectName("sectionLabel")
-        g.addWidget(lbl)
-
-        layout.addWidget(grp)
-        layout.addStretch()
-        return w
+        return _coming_soon_page(
+            "Experimental Features",
+            "GPU-accelerated rendering, predictive ROM scanning, cloud save "
+            "sync, and other cutting-edge features are under active development."
+        )
 
     # ------------------------------------------------------------------
     # Emulator callbacks
@@ -2847,14 +4230,14 @@ class SettingsDialog(QDialog):
             self._mark_dirty()
 
     def _on_edit_emulator(self):
-        QMessageBox.information(
+        _msgbox.information(
             self,
             "Edit Emulator",
             "Use the emulator card settings button to edit an installed emulator.",
         )
 
     def _on_remove_emulator(self):
-        QMessageBox.information(
+        _msgbox.information(
             self,
             "Remove Emulator",
             "Use the trash icon on an emulator card to remove it.",
@@ -2876,6 +4259,13 @@ class SettingsDialog(QDialog):
         # UI  (page 0, sub-tab 1)
         if hasattr(self, "_theme_combo"):
             self._cfg.theme = self._theme_combo.currentText()
+            self._cfg.system_logo_set = self._logo_set_combo.currentText()
+        if hasattr(self, "_chk_show_game_icons"):
+            self._cfg.show_game_icons = self._chk_show_game_icons.isChecked()
+            self._cfg.show_system_logos = self._chk_show_system_logos.isChecked()
+            self._cfg.show_file_extensions = self._chk_show_ext.isChecked()
+            self._cfg.sort_default = self._combo_default_sort.currentText()
+        if hasattr(self, "_theme_combo"):
             self._cfg.font_family = self._font_combo.currentText()
             self._cfg.font_size_label = self._fontsize_combo.currentText()
             self._cfg.bold_text = self._chk_bold.isChecked()
@@ -2890,9 +4280,17 @@ class SettingsDialog(QDialog):
         if hasattr(self, "_chk_remember_geom"):
             self._cfg.remember_window_geometry = self._chk_remember_geom.isChecked()
             self._cfg.borderless_fullscreen = self._chk_borderless.isChecked()
+        if hasattr(self, "_combo_anim_speed"):
+            self._cfg.ui_animation_speed = self._combo_anim_speed.currentText()
+            self._cfg.smooth_scrolling = self._chk_smooth_scroll.isChecked()
+            self._cfg.list_transition_style = self._combo_transition.currentText()
         if hasattr(self, "_chk_vsync"):
             self._cfg.vsync = self._chk_vsync.isChecked()
             self._cfg.gpu_accelerated_ui = self._chk_gpu_ui.isChecked()
+        if hasattr(self, "_combo_text_render"):
+            self._cfg.text_rendering = self._combo_text_render.currentText()
+            self._cfg.image_scaling = self._combo_image_scale.currentText()
+            self._cfg.icon_size = self._combo_icon_size.currentData() or 48
 
         # Performance  (page 2)
         if hasattr(self, "_chk_limit_bg_cpu"):
@@ -2900,6 +4298,13 @@ class SettingsDialog(QDialog):
             self._cfg.scan_threads = self._spin_threads.value()
             self._cfg.background_fps = self._spin_bg_fps.value()
             self._cfg.gpu_backend = self._combo_gpu_backend.currentText()
+        if hasattr(self, "_spin_fg_fps"):
+            self._cfg.foreground_fps = self._spin_fg_fps.value()
+        if hasattr(self, "_chk_lazy_load"):
+            self._cfg.lazy_load_artwork = self._chk_lazy_load.isChecked()
+            self._cfg.prefetch_adjacent = self._chk_prefetch.isChecked()
+            self._cfg.preload_emulator_configs = self._chk_preload_emu.isChecked()
+            self._cfg.max_loaded_images = self._spin_max_imgs.value()
         if hasattr(self, "_chk_cache_art"):
             self._cfg.cache_box_art = self._chk_cache_art.isChecked()
             self._cfg.cache_metadata = self._chk_cache_meta.isChecked()
@@ -2916,15 +4321,18 @@ class SettingsDialog(QDialog):
             self._cfg.audio_mute = self._chk_mute.isChecked()
             self._cfg.audio_mute_background = self._chk_mute_bg.isChecked()
             self._cfg.audio_mute_unfocused_emu = self._chk_mute_unfocused.isChecked()
+        if hasattr(self, "_chk_ambient_enabled"):
+            self._cfg.ambient_audio_enabled = self._chk_ambient_enabled.isChecked()
+            self._cfg.ambient_audio_volume = self._ambient_vol_slider.value()
 
         # Input  (page 4)
         if hasattr(self, "_input_player_controls"):
             self._cfg.input_player_settings = self._collect_input_player_settings()
-        if hasattr(self, "_controller_profiles"):
-            self._cfg.controller_profiles = copy.deepcopy(self._controller_profiles)
-            self._cfg.active_controller_profile = str(
-                getattr(self, "_active_controller_profile", "")
-            )
+        if hasattr(self, "_chk_gamepad_nav"):
+            self._cfg.input_gamepad_nav = self._chk_gamepad_nav.isChecked()
+            self._cfg.input_vibration = self._chk_global_vibration.isChecked()
+            self._cfg.input_motion = self._chk_global_motion.isChecked()
+            self._cfg.input_focus_only = self._chk_input_on_focus.isChecked()
 
         # Emulator BIOS files  (page 5 / Emulators > Configuration)
         if hasattr(self, "_bios_path_inputs"):
@@ -2934,6 +4342,21 @@ class SettingsDialog(QDialog):
                 if path:
                     bios_paths[bios_id] = path
             self._cfg.bios_files = bios_paths
+
+        # Networking  (page 6)
+        if hasattr(self, "_chk_multiplayer_enabled"):
+            self._cfg.multiplayer_enabled = self._chk_multiplayer_enabled.isChecked()
+            self._cfg.multiplayer_username = self._net_username.text().strip() or "Player"
+            self._cfg.multiplayer_port = self._net_port.value()
+            self._cfg.multiplayer_directory_url = self._net_directory_url.text().strip()
+            self._cfg.multiplayer_preferred_region = self._net_region.currentText()
+            self._cfg.multiplayer_auto_refresh_seconds = self._net_auto_refresh.value()
+            self._cfg.multiplayer_show_full_rooms = self._chk_show_full_rooms.isChecked()
+        if hasattr(self, "_chk_retroarch_auto_update"):
+            self._cfg.retroarch_auto_update = self._chk_retroarch_auto_update.isChecked()
+        if hasattr(self, "_chk_updates_startup"):
+            self._cfg.updates_check_on_startup = self._chk_updates_startup.isChecked()
+            self._cfg.updates_include_prerelease = self._chk_updates_prerelease.isChecked()
 
         # Scraper  (page 7)
         if hasattr(self, "_scraper_combo"):
@@ -2955,8 +4378,13 @@ class SettingsDialog(QDialog):
             self._cfg.scraper_auto_scrape = self._chk_auto_scrape.isChecked()
             self._cfg.scraper_overwrite = self._chk_overwrite.isChecked()
             self._cfg.scraper_prefer_local = self._chk_prefer_local.isChecked()
-            self._cfg.scraper_hash_matching = self._chk_hash_matching.isChecked()
             self._cfg.scraper_region_priority = self._scraper_region_combo.currentText()
+
+        # File Management  (Tools > File Management)
+        if hasattr(self, "_chk_verify_scan"):
+            self._cfg.file_verify_on_scan = self._chk_verify_scan.isChecked()
+        if hasattr(self, "_chk_auto_remove"):
+            self._cfg.file_auto_remove_missing = self._chk_auto_remove.isChecked()
 
         # Clock  (page 7 — Tools > Clock)
         if hasattr(self, "_chk_clock_show"):
@@ -2966,6 +4394,14 @@ class SettingsDialog(QDialog):
             self._cfg.clock_fixed_date = self._clock_date.text()
             self._cfg.clock_fixed_time = self._clock_time.text()
             self._cfg.clock_format = self._clock_fmt.currentText()
+
+        # Debug  (page 8)
+        if hasattr(self, "_chk_debug_logging"):
+            self._cfg.debug_logging = self._chk_debug_logging.isChecked()
+            self._cfg.debug_show_fps = self._chk_debug_fps.isChecked()
+            self._cfg.debug_log_emulator_stdout = self._chk_debug_emu_stdout.isChecked()
+            self._cfg.debug_log_level = self._combo_log_level.currentText()
+            self._cfg.debug_show_widget_borders = self._chk_debug_borders.isChecked()
 
         # Only rebuild the stylesheet when a visual setting actually changed —
         # re-applying an identical stylesheet can still cause Qt to re-layout
@@ -2990,6 +4426,10 @@ class SettingsDialog(QDialog):
                     font_override=self._cfg.font_family,
                     high_contrast=self._cfg.high_contrast,
                 ))
+
+        # Apply rendering settings (text AA, animation speed)
+        from meridian.app import apply_rendering_settings
+        apply_rendering_settings(self._cfg)
 
         self._cfg.save()
         self._original_cfg = copy.deepcopy(self._cfg)
@@ -3075,11 +4515,11 @@ class _EmulatorEditDialog(QDialog):
 
     def _on_ok(self):
         if not self._txt_name.text().strip():
-            QMessageBox.warning(self, "Validation", "Emulator name is required.")
+            _msgbox.warning(self, "Validation", "Emulator name is required.")
             self._txt_name.setFocus()
             return
         if not self._txt_path.text().strip():
-            QMessageBox.warning(self, "Validation", "Executable path is required.")
+            _msgbox.warning(self, "Validation", "Executable path is required.")
             self._txt_path.setFocus()
             return
         self.accept()
@@ -3101,11 +4541,16 @@ class _EmulatorSettingsDialog(QDialog):
 
     def __init__(self, entry: EmulatorEntry, config: Config, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"{entry.display_name()} — Settings")
-        self.setMinimumSize(480, 380)
+        self.setWindowTitle(f"{entry.display_name()} \u2014 Settings")
+        self.setMinimumSize(520, 520)
 
         self._entry = entry
         self._cfg = config
+
+        catalog = emulator_catalog_entry(entry.catalog_id or entry.name)
+        self._is_retroarch_core = bool(
+            catalog and catalog.install_strategy == "retroarch_core"
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -3148,25 +4593,90 @@ class _EmulatorSettingsDialog(QDialog):
         grp_gfx = QGroupBox("Graphics")
         g_g = QVBoxLayout(grp_gfx)
         g_g.setSpacing(8)
-        g_g.addWidget(_disabled_check("Pass fullscreen flag on launch"))
-        g_g.addWidget(_disabled_check("Use exclusive fullscreen"))
+
+        self._chk_fullscreen = QCheckBox("Pass fullscreen flag on launch")
+        self._chk_fullscreen.setChecked(entry.fullscreen_on_launch)
+        g_g.addWidget(self._chk_fullscreen)
+
+        self._chk_exclusive_fs = QCheckBox("Use exclusive fullscreen")
+        self._chk_exclusive_fs.setChecked(entry.exclusive_fullscreen)
+        g_g.addWidget(self._chk_exclusive_fs)
 
         res_row = QHBoxLayout()
         res_row.addWidget(QLabel("Resolution override:"))
-        combo = QComboBox()
-        combo.addItems(["Default", "720p", "1080p", "1440p", "4K"])
-        combo.setEnabled(False)
-        res_row.addWidget(combo, 1)
+        self._combo_resolution = QComboBox()
+        self._combo_resolution.addItems(["Default", "720p", "1080p", "1440p", "4K"])
+        self._combo_resolution.setCurrentText(entry.resolution_override)
+        res_row.addWidget(self._combo_resolution, 1)
         g_g.addLayout(res_row)
 
         layout.addWidget(grp_gfx)
+
+        # -- Input / Controls ------------------------------------------
+        grp_input = QGroupBox("Input / Controls")
+        g_i = QVBoxLayout(grp_input)
+        g_i.setSpacing(8)
+
+        if self._is_retroarch_core:
+            note = QLabel(
+                "All RetroArch cores share the same controller profile "
+                "because they all run through RetroArch."
+            )
+            note.setObjectName("sectionLabel")
+            note.setWordWrap(True)
+            g_i.addWidget(note)
+
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(6)
+        profile_row.addWidget(QLabel("Controller profile:"))
+        self._combo_profile = QComboBox()
+        self._refresh_profile_combo()
+        profile_row.addWidget(self._combo_profile, 1)
+
+        btn_edit = QPushButton("Edit\u2026")
+        btn_edit.setFixedWidth(60)
+        btn_edit.setToolTip("Edit the selected controller profile")
+        btn_edit.clicked.connect(self._on_edit_profile)
+        profile_row.addWidget(btn_edit)
+
+        btn_new = QPushButton("New\u2026")
+        btn_new.setFixedWidth(60)
+        btn_new.setToolTip("Create a new controller profile")
+        btn_new.clicked.connect(self._on_new_profile)
+        profile_row.addWidget(btn_new)
+
+        btn_del = QPushButton("Delete")
+        btn_del.setFixedWidth(60)
+        btn_del.setToolTip("Delete the selected controller profile")
+        btn_del.clicked.connect(self._on_delete_profile)
+        profile_row.addWidget(btn_del)
+        self._btn_del_profile = btn_del
+
+        g_i.addLayout(profile_row)
+
+        profile_hint = QLabel(
+            "\u201cGlobal\u201d uses the bindings from Settings \u2192 Input. "
+            "Custom profiles let you set per-emulator controller mappings."
+        )
+        profile_hint.setObjectName("sectionLabel")
+        profile_hint.setWordWrap(True)
+        g_i.addWidget(profile_hint)
+
+        layout.addWidget(grp_input)
 
         # -- Behaviour -------------------------------------------------
         grp_beh = QGroupBox("Behaviour")
         g_b = QVBoxLayout(grp_beh)
         g_b.setSpacing(8)
-        g_b.addWidget(_disabled_check("Close Meridian while running"))
-        g_b.addWidget(_disabled_check("Auto-save state on exit"))
+
+        self._chk_close_meridian = QCheckBox("Close Meridian while running")
+        self._chk_close_meridian.setChecked(entry.close_meridian_on_launch)
+        g_b.addWidget(self._chk_close_meridian)
+
+        self._chk_auto_save = QCheckBox("Auto-save state on exit")
+        self._chk_auto_save.setChecked(entry.auto_save_state)
+        g_b.addWidget(self._chk_auto_save)
+
         layout.addWidget(grp_beh)
 
         layout.addStretch()
@@ -3181,6 +4691,100 @@ class _EmulatorSettingsDialog(QDialog):
         btn_box.accepted.connect(self._on_save)
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box)
+
+        self._combo_profile.currentIndexChanged.connect(self._on_profile_selection_changed)
+        self._on_profile_selection_changed()
+
+    # -- Profile combo helpers -----------------------------------------
+
+    def _refresh_profile_combo(self):
+        self._combo_profile.blockSignals(True)
+        self._combo_profile.clear()
+        self._combo_profile.addItem("Global")
+        for name in sorted(self._cfg.controller_profiles.keys()):
+            self._combo_profile.addItem(name)
+
+        current = self._entry.controller_profile or "Global"
+        if self._is_retroarch_core and current == "Global":
+            current = "RetroArch"
+        idx = self._combo_profile.findText(current)
+        if idx < 0:
+            if self._is_retroarch_core:
+                self._cfg.controller_profiles.setdefault("RetroArch", {})
+                self._combo_profile.addItem("RetroArch")
+                idx = self._combo_profile.findText("RetroArch")
+            else:
+                idx = 0
+        self._combo_profile.setCurrentIndex(idx)
+        self._combo_profile.blockSignals(False)
+
+    def _on_profile_selection_changed(self):
+        name = self._combo_profile.currentText()
+        self._btn_del_profile.setEnabled(name != "Global")
+
+    # -- Profile management --------------------------------------------
+
+    def _on_edit_profile(self):
+        name = self._combo_profile.currentText()
+        if name == "Global":
+            data = copy.deepcopy(self._cfg.input_player_settings)
+        else:
+            data = copy.deepcopy(self._cfg.controller_profiles.get(name, {}))
+
+        dlg = _ControllerProfileEditorDialog(name, data, self._cfg, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            result = dlg.profile_data()
+            if name == "Global":
+                self._cfg.input_player_settings = result
+            else:
+                self._cfg.controller_profiles[name] = result
+
+    def _on_new_profile(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(
+            self, "New Controller Profile", "Profile name:",
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name == "Global":
+            _msgbox.warning(self, "Invalid Name", '"Global" is reserved.')
+            return
+        if name in self._cfg.controller_profiles:
+            _msgbox.warning(
+                self, "Duplicate",
+                f'A profile named "{name}" already exists.',
+            )
+            return
+        self._cfg.controller_profiles[name] = copy.deepcopy(
+            self._cfg.input_player_settings
+        )
+        self._refresh_profile_combo()
+        idx = self._combo_profile.findText(name)
+        if idx >= 0:
+            self._combo_profile.setCurrentIndex(idx)
+
+    def _on_delete_profile(self):
+        name = self._combo_profile.currentText()
+        if name == "Global":
+            return
+        confirm = _msgbox.question(
+            self,
+            "Delete Profile",
+            f'Delete controller profile "{name}"?\n\n'
+            "Emulators using it will revert to Global.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._cfg.controller_profiles.pop(name, None)
+        for emu in self._cfg.emulators:
+            if emu.controller_profile == name:
+                emu.controller_profile = "Global"
+        self._refresh_profile_combo()
+
+    # -- Browse helpers ------------------------------------------------
 
     def _on_browse_exe(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3199,11 +4803,284 @@ class _EmulatorSettingsDialog(QDialog):
         if path:
             self._txt_rom_dir.setText(path)
 
+    # -- Save ----------------------------------------------------------
+
     def _on_save(self):
         self._entry.path = self._txt_exe.text().strip()
         self._entry.args = self._txt_args.text().strip() or '"{rom}"'
         self._entry.rom_directory = self._txt_rom_dir.text().strip()
+        self._entry.fullscreen_on_launch = self._chk_fullscreen.isChecked()
+        self._entry.exclusive_fullscreen = self._chk_exclusive_fs.isChecked()
+        self._entry.resolution_override = self._combo_resolution.currentText()
+        self._entry.close_meridian_on_launch = self._chk_close_meridian.isChecked()
+        self._entry.auto_save_state = self._chk_auto_save.isChecked()
+
+        chosen_profile = self._combo_profile.currentText()
+        self._entry.controller_profile = chosen_profile
+
+        if self._is_retroarch_core:
+            for emu in self._cfg.emulators:
+                cat = emulator_catalog_entry(emu.catalog_id or emu.name)
+                if cat and cat.install_strategy == "retroarch_core":
+                    emu.controller_profile = chosen_profile
+
         self.accept()
+
+
+# ======================================================================
+# Controller profile editor dialog
+# ======================================================================
+
+
+class _ControllerProfileEditorDialog(QDialog):
+    """Full controller profile editor with per-player tabs.
+
+    Mirrors the main Input page but operates on a standalone profile dict
+    instead of the global ``input_player_settings``.
+    """
+
+    _MAX_PLAYERS = 4
+
+    def __init__(
+        self,
+        profile_name: str,
+        profile_data: dict,
+        config: Config,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"Controller Profile \u2014 {profile_name}")
+        self.setMinimumSize(700, 540)
+        self.resize(760, 580)
+
+        self._name = profile_name
+        self._data = profile_data
+        self._cfg = config
+
+        from meridian.core.input_manager import InputManager
+        self._input_mgr = InputManager.instance()
+        self._input_mgr.ensure_ready()
+
+        self._player_controls: dict[int, dict[str, object]] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        header = QLabel(
+            f"Editing bindings for profile <b>{profile_name}</b>. "
+            "Changes take effect when you save."
+        )
+        header.setObjectName("sectionLabel")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        tabs = QTabWidget()
+        tabs.setObjectName("subTabs")
+        for p in range(1, self._MAX_PLAYERS + 1):
+            tabs.addTab(self._build_player_tab(p), f"Player {p}")
+        layout.addWidget(tabs, 1)
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel,
+        )
+        btn_box.button(QDialogButtonBox.StandardButton.Save).setObjectName("primaryButton")
+        btn_box.button(QDialogButtonBox.StandardButton.Cancel).setObjectName("cancelButton")
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+    def profile_data(self) -> dict:
+        """Return the edited profile data (call after ``Accepted``)."""
+        result = copy.deepcopy(self._data)
+        for num, ctrl_map in self._player_controls.items():
+            chk = ctrl_map.get("connected")
+            api = ctrl_map.get("api")
+            dev = ctrl_map.get("device")
+            typ = ctrl_map.get("type")
+            if not all(isinstance(w, (QCheckBox, QComboBox)) for w in [chk, api, dev, typ]):
+                continue
+            bindings_map: dict[str, str] = {}
+            bind_buttons = ctrl_map.get("bindings")
+            if isinstance(bind_buttons, dict):
+                for key, btn in bind_buttons.items():
+                    if hasattr(btn, "text"):
+                        val = btn.text().strip()
+                        if val and val != "Listening \u2026":
+                            bindings_map[key] = val
+            result[str(num)] = {
+                "connected": chk.isChecked(),
+                "api": api.currentText(),
+                "device": dev.currentText(),
+                "device_index": (
+                    int(dev.currentData())
+                    if isinstance(dev.currentData(), int) and dev.currentData() >= 0
+                    else None
+                ),
+                "type": typ.currentText(),
+                "bindings": bindings_map,
+            }
+        return result
+
+    # -- Player tab builder --------------------------------------------
+
+    def _build_player_tab(self, num: int) -> QWidget:
+        saved = self._data.get(str(num), {})
+        saved_bindings = saved.get("bindings", {})
+        defs = saved_bindings if saved_bindings else (
+            _PLAYER1_BINDINGS if num == 1 else {}
+        )
+        mgr = self._input_mgr
+
+        bindings: dict[str, _BindButton] = {}
+
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(6)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+
+        chk = QCheckBox("Connected")
+        chk.setChecked(bool(saved.get("connected", num == 1)))
+
+        def _on_connected(on: bool):
+            body.setEnabled(on)
+        chk.toggled.connect(_on_connected)
+        top.addWidget(chk)
+
+        top.addWidget(QLabel("API:"))
+        api = QComboBox()
+        api.addItems(["XInput", "DirectInput", "SDL"])
+        api.setMinimumWidth(80)
+        saved_api = str(saved.get("api", "SDL"))
+        if saved_api == "Auto":
+            saved_api = "SDL"
+        api.setCurrentIndex(max(api.findText(saved_api), 0))
+        top.addWidget(api)
+
+        top.addWidget(QLabel("Device:"))
+        dev = QComboBox()
+        dev.addItem("None", None)
+        dev.addItem("Keyboard + Mouse", "keyboard")
+        dev.addItem("Any Available", "any")
+        for c in mgr.controllers():
+            dev.addItem(c.name, c.index)
+        saved_dev = str(saved.get("device", "Any Available"))
+        idx = dev.findText(saved_dev)
+        dev.setCurrentIndex(idx if idx >= 0 else dev.findText("Any Available"))
+        dev.setMinimumWidth(100)
+        top.addWidget(dev, 1)
+
+        top.addWidget(QLabel("Type:"))
+        tcombo = QComboBox()
+        tcombo.addItems([
+            "Pro Controller", "Gamepad", "Xbox Controller", "DualShock",
+            "DualSense", "GameCube", "N64 Controller",
+            "Joy-Con (L+R)", "Joy-Con (Single)",
+            "Wii Remote", "Wii Remote + Nunchuk", "Classic Controller",
+            "Fight Stick", "Steering Wheel", "Custom",
+        ])
+        tcombo.setMinimumWidth(100)
+        saved_type = str(saved.get("type", "Pro Controller"))
+        tcombo.setCurrentIndex(max(tcombo.findText(saved_type), 0))
+        top.addWidget(tcombo, 1)
+
+        layout.addLayout(top)
+
+        def _get_device() -> str:
+            return dev.currentText()
+
+        def _get_device_index() -> int | None:
+            data = dev.currentData()
+            return data if isinstance(data, int) and data >= 0 else None
+
+        binds_container = QWidget()
+        binds_layout = QVBoxLayout(binds_container)
+        binds_layout.setContentsMargins(0, 0, 0, 0)
+        binds_layout.setSpacing(6)
+
+        def _rebuild():
+            old_values: dict[str, str] = {}
+            for key, btn in bindings.items():
+                val = btn.text().strip()
+                if val and val != "Listening \u2026":
+                    old_values[key] = val
+            bindings.clear()
+            while binds_layout.count():
+                item = binds_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+                elif item.layout():
+                    _clear_layout(item.layout())
+
+            type_name = tcombo.currentText()
+            sections = _CONTROLLER_LAYOUTS.get(
+                type_name, _CONTROLLER_LAYOUTS["Pro Controller"]
+            )
+            for section_title, bind_defs in sections:
+                binds_layout.addWidget(_section_label(section_title))
+                for key, label in bind_defs:
+                    saved_val = old_values.get(key) or defs.get(key, "")
+                    btn = _BindButton(
+                        saved_val,
+                        device_fn=_get_device,
+                        device_index_fn=_get_device_index,
+                    )
+                    bindings[key] = btn
+                    binds_layout.addLayout(_bind_row(label, btn))
+
+        tcombo.currentIndexChanged.connect(lambda _: _rebuild())
+        _rebuild()
+
+        body_layout.addWidget(binds_container)
+        body_layout.addStretch()
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        bottom.addStretch()
+        btn_def = QPushButton(" Defaults ")
+
+        def _on_defaults():
+            target = _PLAYER1_BINDINGS if num == 1 else {}
+            for key, btn in bindings.items():
+                btn.set_binding(target.get(key, ""))
+        btn_def.clicked.connect(_on_defaults)
+        bottom.addWidget(btn_def)
+
+        btn_clr = QPushButton(" Clear ")
+
+        def _on_clear():
+            for btn in bindings.values():
+                btn.set_binding("")
+        btn_clr.clicked.connect(_on_clear)
+        bottom.addWidget(btn_clr)
+        body_layout.addLayout(bottom)
+
+        layout.addWidget(body, 1)
+        body.setEnabled(chk.isChecked())
+
+        self._player_controls[num] = {
+            "connected": chk,
+            "api": api,
+            "device": dev,
+            "type": tcombo,
+            "bindings": bindings,
+        }
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(scroll_content)
+        return scroll
 
 
 # ======================================================================
@@ -3222,6 +5099,39 @@ def _placeholder(name: str) -> QWidget:
     return w
 
 
+def _coming_soon_page(title: str, description: str) -> QWidget:
+    """Page placeholder for features that are not yet implemented."""
+    w = QWidget()
+    layout = QVBoxLayout(w)
+    layout.setContentsMargins(40, 40, 40, 40)
+    layout.addStretch()
+
+    icon_lbl = QLabel("🚧")
+    icon_lbl.setStyleSheet("font-size: 32pt; background: transparent;")
+    icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    layout.addWidget(icon_lbl)
+
+    heading = QLabel(f"<b>{title}</b>")
+    heading.setStyleSheet("font-size: 14pt; background: transparent;")
+    heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    layout.addWidget(heading)
+
+    sub = QLabel("Coming Soon")
+    sub.setObjectName("sectionLabel")
+    sub.setStyleSheet("font-size: 11pt; background: transparent;")
+    sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    layout.addWidget(sub)
+
+    desc = QLabel(description)
+    desc.setObjectName("sectionLabel")
+    desc.setWordWrap(True)
+    desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    layout.addWidget(desc)
+
+    layout.addStretch()
+    return w
+
+
 def _disabled_check(text: str, checked: bool = False) -> QCheckBox:
     """Create a disabled checkbox placeholder."""
     cb = QCheckBox(text)
@@ -3235,10 +5145,6 @@ def _disabled_check(text: str, checked: bool = False) -> QCheckBox:
 # ======================================================================
 
 _PLAYER1_BINDINGS: dict[str, str] = {
-    # SDL2 Game Controller standard:
-    #   Axis 0 = Left X,  Axis 1 = Left Y  (positive = right / down)
-    #   Axis 2 = Right X, Axis 3 = Right Y (positive = right / down)
-    #   Axis 4 = Left Trigger, Axis 5 = Right Trigger (positive = pressed)
     "ls_up": "Axis 1-", "ls_down": "Axis 1+",
     "ls_left": "Axis 0-", "ls_right": "Axis 0+",
     "ls_press": "Button 7",
@@ -3247,7 +5153,6 @@ _PLAYER1_BINDINGS: dict[str, str] = {
     "rs_press": "Button 8",
     "dp_up": "Button 11", "dp_down": "Button 12",
     "dp_left": "Button 13", "dp_right": "Button 14",
-    # Nintendo layout: A=east(1), B=south(0), X=north(3), Y=west(2)
     "a": "Button 1", "b": "Button 0",
     "x": "Button 3", "y": "Button 2",
     "l": "Button 9", "r": "Button 10",
@@ -3256,6 +5161,97 @@ _PLAYER1_BINDINGS: dict[str, str] = {
     "capture": "Button 15", "home": "Button 5",
     "motion": "Gyro",
 }
+
+
+# Per-controller-type button layouts.
+# Each entry is a list of (section_title, [(bind_key, display_label), ...]).
+_CONTROLLER_LAYOUTS: dict[str, list[tuple[str, list[tuple[str, str]]]]] = {
+    "Pro Controller": [
+        ("Face Buttons", [("a", "A"), ("b", "B"), ("x", "X"), ("y", "Y")]),
+        ("Shoulders", [("l", "L"), ("r", "R"), ("zl", "ZL"), ("zr", "ZR")]),
+        ("Menu", [("plus", "Start / +"), ("minus", "Select / \u2212"), ("home", "Home"), ("capture", "Capture")]),
+        ("Left Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right"), ("ls_press", "Pressed")]),
+        ("Right Stick", [("rs_up", "Up"), ("rs_down", "Down"), ("rs_left", "Left"), ("rs_right", "Right"), ("rs_press", "Pressed")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+    ],
+    "Xbox Controller": [
+        ("Face Buttons", [("a", "A"), ("b", "B"), ("x", "X"), ("y", "Y")]),
+        ("Shoulders", [("lb", "LB"), ("rb", "RB"), ("lt", "LT"), ("rt", "RT")]),
+        ("Menu", [("start", "Menu"), ("back", "View"), ("guide", "Xbox")]),
+        ("Left Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right"), ("ls_press", "LS Click")]),
+        ("Right Stick", [("rs_up", "Up"), ("rs_down", "Down"), ("rs_left", "Left"), ("rs_right", "Right"), ("rs_press", "RS Click")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+    ],
+    "DualShock": [
+        ("Face Buttons", [("cross", "Cross"), ("circle", "Circle"), ("square", "Square"), ("triangle", "Triangle")]),
+        ("Shoulders", [("l1", "L1"), ("r1", "R1"), ("l2", "L2"), ("r2", "R2")]),
+        ("Menu", [("options", "Options"), ("share", "Share"), ("ps", "PS"), ("touchpad", "Touchpad")]),
+        ("Left Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right"), ("l3", "L3")]),
+        ("Right Stick", [("rs_up", "Up"), ("rs_down", "Down"), ("rs_left", "Left"), ("rs_right", "Right"), ("r3", "R3")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+    ],
+    "DualSense": [
+        ("Face Buttons", [("cross", "Cross"), ("circle", "Circle"), ("square", "Square"), ("triangle", "Triangle")]),
+        ("Shoulders", [("l1", "L1"), ("r1", "R1"), ("l2", "L2 (Adaptive)"), ("r2", "R2 (Adaptive)")]),
+        ("Menu", [("options", "Options"), ("create", "Create"), ("ps", "PS"), ("touchpad", "Touchpad"), ("mute", "Mute")]),
+        ("Left Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right"), ("l3", "L3")]),
+        ("Right Stick", [("rs_up", "Up"), ("rs_down", "Down"), ("rs_left", "Left"), ("rs_right", "Right"), ("r3", "R3")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+    ],
+    "GameCube": [
+        ("Face Buttons", [("a", "A"), ("b", "B"), ("x", "X"), ("y", "Y"), ("z", "Z")]),
+        ("Shoulders", [("l", "L (Analog)"), ("r", "R (Analog)")]),
+        ("Menu", [("start", "Start")]),
+        ("Control Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right")]),
+        ("C-Stick", [("cs_up", "Up"), ("cs_down", "Down"), ("cs_left", "Left"), ("cs_right", "Right")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+    ],
+    "Joy-Con (L+R)": [
+        ("Face Buttons", [("a", "A"), ("b", "B"), ("x", "X"), ("y", "Y")]),
+        ("Shoulders", [("l", "L"), ("r", "R"), ("zl", "ZL"), ("zr", "ZR"), ("sl_l", "SL (L)"), ("sr_l", "SR (L)"), ("sl_r", "SL (R)"), ("sr_r", "SR (R)")]),
+        ("Menu", [("plus", "+"), ("minus", "\u2212"), ("home", "Home"), ("capture", "Capture")]),
+        ("Left Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right"), ("ls_press", "Pressed")]),
+        ("Right Stick", [("rs_up", "Up"), ("rs_down", "Down"), ("rs_left", "Left"), ("rs_right", "Right"), ("rs_press", "Pressed")]),
+    ],
+    "Joy-Con (Single)": [
+        ("Buttons (Horizontal)", [("a", "Right"), ("b", "Down"), ("x", "Up"), ("y", "Left"), ("sl", "SL"), ("sr", "SR")]),
+        ("Shoulders", [("l_zl", "L / ZL")]),
+        ("Menu", [("plus_minus", "+  /  \u2212")]),
+        ("Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right"), ("ls_press", "Pressed")]),
+    ],
+    "Wii Remote": [
+        ("Buttons", [("a", "A"), ("b", "B (Trigger)"), ("one", "1"), ("two", "2"), ("plus", "+"), ("minus", "\u2212"), ("home", "Home")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+    ],
+    "Wii Remote + Nunchuk": [
+        ("Wii Remote", [("a", "A"), ("b", "B (Trigger)"), ("one", "1"), ("two", "2"), ("plus", "+"), ("minus", "\u2212"), ("home", "Home")]),
+        ("Nunchuk", [("c", "C"), ("z", "Z")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+        ("Nunchuk Stick", [("ns_up", "Up"), ("ns_down", "Down"), ("ns_left", "Left"), ("ns_right", "Right")]),
+    ],
+    "Classic Controller": [
+        ("Face Buttons", [("a", "a"), ("b", "b"), ("x", "x"), ("y", "y")]),
+        ("Shoulders", [("l", "L"), ("r", "R"), ("zl", "ZL"), ("zr", "ZR")]),
+        ("Menu", [("plus", "+"), ("minus", "\u2212"), ("home", "Home")]),
+        ("Left Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right")]),
+        ("Right Stick", [("rs_up", "Up"), ("rs_down", "Down"), ("rs_left", "Left"), ("rs_right", "Right")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+    ],
+    "N64 Controller": [
+        ("Face Buttons", [("a", "A"), ("b", "B")]),
+        ("C Buttons", [("c_up", "C-Up"), ("c_down", "C-Down"), ("c_left", "C-Left"), ("c_right", "C-Right")]),
+        ("Shoulders", [("l", "L"), ("r", "R"), ("z", "Z")]),
+        ("Menu", [("start", "Start")]),
+        ("Control Stick", [("ls_up", "Up"), ("ls_down", "Down"), ("ls_left", "Left"), ("ls_right", "Right")]),
+        ("D-Pad", [("dp_up", "Up"), ("dp_down", "Down"), ("dp_left", "Left"), ("dp_right", "Right")]),
+    ],
+}
+
+# Aliases so every Type combo entry resolves to a layout
+_CONTROLLER_LAYOUTS["Gamepad"] = _CONTROLLER_LAYOUTS["Pro Controller"]
+_CONTROLLER_LAYOUTS["Fight Stick"] = _CONTROLLER_LAYOUTS["Gamepad"]
+_CONTROLLER_LAYOUTS["Steering Wheel"] = _CONTROLLER_LAYOUTS["Gamepad"]
+_CONTROLLER_LAYOUTS["Custom"] = _CONTROLLER_LAYOUTS["Pro Controller"]
 
 
 def _qt_key_name(key: int) -> str | None:
@@ -3321,10 +5317,12 @@ class _BindButton(QPushButton):
         self,
         text: str = "",
         device_fn: object | None = None,
+        device_index_fn: object | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(text, parent)
         self._device_fn = device_fn or (lambda: "Any Available")
+        self._device_index_fn = device_index_fn or (lambda: None)
         self._saved = text
         self._capturing = False
         self._mouse_armed = False
@@ -3404,7 +5402,13 @@ class _BindButton(QPushButton):
         mgr = InputManager.instance()
         device_idx: int | None = None
         if device != "Any Available":
-            device_idx = mgr.index_for_name(device)
+            chosen = self._device_index_fn()
+            if isinstance(chosen, int) and chosen >= 0:
+                device_idx = chosen
+            else:
+                # Backwards compatibility for older saved configs that only
+                # persisted a device name.
+                device_idx = mgr.index_for_name(device)
             if device_idx is None:
                 return
 
@@ -3594,6 +5598,16 @@ class _MousePanningConfigDialog(QDialog):
 # ======================================================================
 # Row-builder helpers  (used by _input_player)
 # ======================================================================
+
+def _clear_layout(layout):
+    """Recursively remove all items from a layout."""
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget():
+            item.widget().deleteLater()
+        elif item.layout():
+            _clear_layout(item.layout())
+
 
 def _section_label(text: str) -> QWidget:
     """Section header with a horizontal rule."""

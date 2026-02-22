@@ -1,0 +1,15 @@
+Meridian crash log
+==================
+Timestamp : 2026-02-18 22:27:31 UTC
+Python    : 3.12.9 | packaged by Anaconda, Inc. | (main, Feb  6 2025, 18:49:16) [MSC v.1929 64 bit (AMD64)]
+Platform  : win32
+Exception : AttributeError: 'SettingsDialog' object has no attribute '_browse_filter'
+
+Traceback (most recent call last):
+  File "E:\PROJECTS\Meridian\meridian\ui\settings_dialog.py", line 2289, in <lambda>
+    lambda _, c=card, e=entry: self._on_delete_installed(c, e)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\PROJECTS\Meridian\meridian\ui\settings_dialog.py", line 2421, in _on_delete_installed
+    self._populate_browse_catalog(self._browse_filter.currentData() or "")
+                                  ^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SettingsDialog' object has no attribute '_browse_filter'. Did you mean: '_on_browse_filter'?

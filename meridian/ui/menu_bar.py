@@ -1,7 +1,11 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 import webbrowser
 
 from PySide6.QtWidgets import (
-    QMenuBar, QMenu, QMessageBox, QApplication, QDialog,
+    QMenuBar, QMenu, QMessageBox, QApplication,
 )
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 
@@ -19,8 +23,8 @@ class MenuBar(QMenuBar):
     Application menu bar for Meridian.
 
     Menus: File, Edit, View, Tools, Multiplayer, Account, Help.
-    Actions that aren't wired to real functionality yet are created
-    but left disabled so the UI is honest about what works.
+    Some actions are currently UI-complete but still show "coming soon"
+    messaging until multiplayer/update backends are fully integrated.
     """
 
     def __init__(self, config: Config, parent=None):
@@ -94,6 +98,7 @@ class MenuBar(QMenuBar):
             menu, "&Grid View",
             shortcut="Ctrl+1",
             callback=self._on_view_grid,
+            enabled=False,
         )
         self._act_grid_view.setCheckable(True)
         self._act_list_view = _action(
@@ -164,25 +169,20 @@ class MenuBar(QMenuBar):
         metadata_menu = QMenu("&Metadata && Scraping", self)
         menu.addMenu(metadata_menu)
         self._act_scrape_library = _action(
-            metadata_menu,
-            "Scrape &Library Metadata",
-            callback=self._on_scrape_library_metadata,
+            metadata_menu, "Scrape &Library Metadata",
+            callback=self._on_scrape_library,
         )
         self._act_scrape_selected = _action(
-            metadata_menu,
-            "Scrape &Selected Game Metadata",
-            callback=self._on_scrape_selected_metadata,
+            metadata_menu, "Scrape &Selected Game Metadata",
+            callback=self._on_scrape_selected,
         )
         self._act_scrape = _action(
-            metadata_menu,
-            "Scraper &Settings...",
-            shortcut="Ctrl+M",
+            metadata_menu, "Scraper &Settings...", shortcut="Ctrl+M",
             callback=lambda: self._on_open_settings_page("Tools", "Scraper"),
         )
         metadata_menu.addSeparator()
         self._act_clear_cache = _action(
-            metadata_menu,
-            "&Clear Metadata Cache",
+            metadata_menu, "&Clear Metadata Cache",
             callback=self._on_clear_metadata_cache,
         )
 
@@ -216,25 +216,17 @@ class MenuBar(QMenuBar):
     def _build_multiplayer_menu(self):
         menu = self.addMenu("M&ultiplayer")
 
-        self._act_host = _action(
-            menu, "&Host Room...",
-            enabled=False,
-        )
-        self._act_join = _action(
-            menu, "&Join Room...",
-            enabled=False,
-        )
-        self._act_direct = _action(
-            menu, "&Direct Connect...",
-            enabled=False,
-        )
-
+        self._act_host = _action(menu, "&Host Room...", enabled=False)
+        self._act_join = _action(menu, "&Join Room...", enabled=False)
+        self._act_direct = _action(menu, "&Direct Connect...", enabled=False)
         menu.addSeparator()
-
-        self._act_room_list = _action(
-            menu, "Show Room &List",
-            enabled=False,
+        self._act_room_list = _action(menu, "Show Room &List", enabled=False)
+        self._act_mp_settings = _action(
+            menu, "Multiplayer &Settings...",
+            callback=lambda: self._on_open_settings_page("Networking", "Multiplayer"),
         )
+        menu.addSeparator()
+        _action(menu, "Coming Soon", enabled=False)
 
     # ------------------------------------------------------------------
     # Account
@@ -406,6 +398,27 @@ class MenuBar(QMenuBar):
         else:
             self._window.showFullScreen()
             self._act_fullscreen.setChecked(True)
+
+    def _on_scrape_library(self):
+        if self._window is None:
+            return
+        fn = getattr(self._window, "scrape_metadata_library", None)
+        if callable(fn):
+            fn()
+
+    def _on_scrape_selected(self):
+        if self._window is None:
+            return
+        fn = getattr(self._window, "scrape_selected_metadata", None)
+        if callable(fn):
+            fn()
+
+    def _on_clear_metadata_cache(self):
+        if self._window is None:
+            return
+        fn = getattr(self._window, "clear_metadata_cache", None)
+        if callable(fn):
+            fn()
 
     def _on_view_grid(self):
         if self._window is None:

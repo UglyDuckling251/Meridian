@@ -1,9 +1,13 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon, QFontDatabase, QSurfaceFormat
+from PySide6.QtGui import QIcon, QFont, QFontDatabase, QSurfaceFormat
 
 from meridian.core.config import Config
 from meridian.ui.main_window import MainWindow
@@ -19,37 +23,80 @@ def _apply_surface_settings(cfg: Config) -> None:
 
     These settings MUST be applied before QApplication.__init__ because they
     affect the underlying surface format and RHI backend used by Qt.
-
-    On Windows 11 we force **Direct3D 11** via Qt's RHI (Rendering Hardware
-    Interface).  D3D11 uses the GPU's native 10-/16-bit pipeline for
-    compositing, which eliminates the gradient banding that OpenGL's
-    default 8-bit framebuffer produces on desktop Windows.
     """
     import sys
 
     # -- RHI backend selection ------------------------------------------
-    if sys.platform == "win32":
-        # D3D11 gives the best colour depth on modern Windows.
-        os.environ["QSG_RHI_BACKEND"] = "d3d11"
-    elif cfg.gpu_accelerated_ui:
-        os.environ.setdefault("QSG_RHI_BACKEND", "opengl")
-    else:
-        os.environ.pop("QSG_RHI_BACKEND", None)
+    backend = cfg.gpu_backend  # "Auto", "OpenGL", "Software"
 
-    # Share GL contexts (needed for any RHI backend)
+    if backend == "Software":
+        os.environ.pop("QSG_RHI_BACKEND", None)
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
+    elif backend == "OpenGL":
+        os.environ["QSG_RHI_BACKEND"] = "opengl"
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, False)
+    else:
+        # Auto — use D3D11 on Windows for best colour depth, OpenGL elsewhere
+        if sys.platform == "win32":
+            os.environ["QSG_RHI_BACKEND"] = "d3d11"
+        elif cfg.gpu_accelerated_ui:
+            os.environ.setdefault("QSG_RHI_BACKEND", "opengl")
+        else:
+            os.environ.pop("QSG_RHI_BACKEND", None)
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, False)
+
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
 
     # -- Surface format ------------------------------------------------
     fmt = QSurfaceFormat()
     fmt.setSwapInterval(1 if cfg.vsync else 0)
-    # Request the deepest colour channels the driver can provide.
-    fmt.setRedBufferSize(10)
-    fmt.setGreenBufferSize(10)
-    fmt.setBlueBufferSize(10)
-    fmt.setAlphaBufferSize(8)
-    # Request stronger MSAA so rounded QML primitives render cleaner.
-    fmt.setSamples(8)
+
+    if backend != "Software":
+        fmt.setRedBufferSize(10)
+        fmt.setGreenBufferSize(10)
+        fmt.setBlueBufferSize(10)
+        fmt.setAlphaBufferSize(8)
+        fmt.setSamples(8 if cfg.gpu_accelerated_ui else 4)
+        if backend == "OpenGL":
+            fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+            fmt.setVersion(3, 3)
+            fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+
     QSurfaceFormat.setDefaultFormat(fmt)
+
+
+def apply_rendering_settings(cfg: Config) -> None:
+    """Apply text anti-aliasing, animation speed, and image scaling settings.
+
+    Safe to call at any point after QApplication has been created.
+    """
+    app = QApplication.instance()
+    if not app:
+        return
+
+    # -- Animation speed -----------------------------------------------
+    # Reduced motion overrides animation speed to disable all effects.
+    speed = cfg.ui_animation_speed
+    enable_anims = speed != "Instant" and not cfg.reduced_motion
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateMenu, enable_anims)
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, enable_anims)
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateTooltip, enable_anims)
+    app.setEffectEnabled(Qt.UIEffect.UI_FadeMenu, enable_anims)
+    app.setEffectEnabled(Qt.UIEffect.UI_FadeTooltip, enable_anims)
+
+    # -- Text anti-aliasing --------------------------------------------
+    font = app.font()
+    mode = cfg.text_rendering
+    if mode == "Subpixel":
+        font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+        font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    elif mode == "Greyscale":
+        font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
+        font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    else:  # None
+        font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+        font.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
+    app.setFont(font)
 
 
 class MeridianApp:
@@ -77,6 +124,8 @@ class MeridianApp:
             font_override=cfg.font_family,
             high_contrast=cfg.high_contrast,
         ))
+
+        apply_rendering_settings(cfg)
 
         self._window = MainWindow()
 

@@ -1,3 +1,7 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 """
 Centralised theme engine for Meridian.
 
@@ -256,10 +260,10 @@ ACCENT_GREEN = _active.accent_secondary
 # Dimensions (theme-independent)
 # ======================================================================
 
-_BAR_PADDING_V = "3px"
-_BAR_PADDING_H = "7px"
-_ITEM_PADDING_V = "4px"
-_ITEM_PADDING_H = "20px"
+_BAR_PADDING_V_BASE = 3
+_BAR_PADDING_H_BASE = 7
+_ITEM_PADDING_V_BASE = 4
+_ITEM_PADDING_H_BASE = 20
 _SEPARATOR_H = "1px"
 _MENU_RADIUS = "4px"
 
@@ -378,6 +382,11 @@ def build_stylesheet(
     def dp(base: int) -> str:
         """Scale a base pixel value by density and return as 'Npx'."""
         return f"{max(1, round(base * dm))}px"
+
+    _BAR_PADDING_V = dp(_BAR_PADDING_V_BASE)
+    _BAR_PADDING_H = dp(_BAR_PADDING_H_BASE)
+    _ITEM_PADDING_V = dp(_ITEM_PADDING_V_BASE)
+    _ITEM_PADDING_H = dp(_ITEM_PADDING_H_BASE)
 
     # Font size from label
     font_sz = _FONT_SIZE_MAP.get(font_size_label, t.font_size)

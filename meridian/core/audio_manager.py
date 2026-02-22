@@ -1,3 +1,7 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 """
 Audio device management for Meridian.
 
@@ -8,6 +12,9 @@ Uses ``sounddevice`` (PortAudio) to enumerate input/output devices and
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+
+_SOUNDS_DIR = Path(__file__).resolve().parents[2] / "assets" / "sounds"
 
 
 @dataclass
@@ -127,6 +134,36 @@ class AudioManager:
     @property
     def is_muted(self) -> bool:
         return self._muted
+
+    # -- Sound effects -----------------------------------------------------
+
+    def play_sound(self, name: str) -> int:
+        """Play a short sound effect from ``assets/sounds/<name>.mp3``.
+
+        The sound respects the current volume and mute state.
+        Returns the duration in milliseconds (0 if not played).
+        """
+        if not self._mixer_ready or self._muted:
+            return 0
+        path = _SOUNDS_DIR / f"{name}.mp3"
+        if not path.exists():
+            return 0
+        try:
+            import pygame
+            sound = pygame.mixer.Sound(str(path))
+            sound.set_volume(self._volume)
+            sound.play()
+            return int(sound.get_length() * 1000)
+        except Exception:
+            return 0
+
+    def play_startup(self) -> int:
+        """Play the startup chime. Returns duration in milliseconds."""
+        return self.play_sound("startup")
+
+    def play_notification(self) -> None:
+        """Play the notification / task-complete chime."""
+        self.play_sound("notification")
 
     def apply_config(self, cfg) -> None:
         """Convenience: read all audio fields from a Config and apply them."""

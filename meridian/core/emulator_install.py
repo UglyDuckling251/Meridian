@@ -1,6 +1,11 @@
+# Copyright (C) 2025-2026 Meridian Contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# See LICENSE for the full text.
+
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -12,27 +17,19 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from meridian.core.config import EmulatorCatalogEntry, EmulatorEntry
+from meridian.core.config import EmulatorCatalogEntry, EmulatorEntry, EMULATOR_CATALOG_BY_ID
 
+log = logging.getLogger(__name__)
 
 _GITHUB_API_BASE = "https://api.github.com/repos"
 _HTTP_HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "Meridian-Installer/1.0",
 }
+_RETROARCH_BUILDBOT_NIGHTLY = (
+    "https://buildbot.libretro.com/nightly/windows/x86_64/latest"
+)
 
-# Maps explicit retroarch core catalog IDs to their expected DLL names.
-_RETROARCH_CORE_DLLS: dict[str, str] = {
-    "genesis_plus_gx_core": "genesis_plus_gx_libretro.dll",
-    "picodrive_core": "picodrive_libretro.dll",
-    "beetle_saturn_core": "mednafen_saturn_libretro.dll",
-    "prosystem_core": "prosystem_libretro.dll",
-    "handy_core": "handy_libretro.dll",
-    "virtual_jaguar_core": "virtualjaguar_libretro.dll",
-    "beetle_pce_core": "mednafen_pce_libretro.dll",
-    "beetle_pce_fast_core": "mednafen_pce_fast_libretro.dll",
-    "beetle_neopop_core": "mednafen_ngp_libretro.dll",
-}
 
 @dataclass
 class InstallResult:
@@ -54,53 +51,266 @@ class ReleaseInfo:
     assets: list[ReleaseAsset]
 
 
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
 def emulators_root() -> Path:
+    """``<project>/emulators/`` — standalone emulators and downloaded cores."""
     root = project_root() / "emulators"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
+def _retroarch_default_dir() -> Path:
+    """``<project>/retroarch/`` — dedicated top-level folder for RetroArch."""
+    return project_root() / "retroarch"
+
+
+# ---------------------------------------------------------------------------
+# RetroArch management  (required dependency for all cores)
+# ---------------------------------------------------------------------------
+
+def find_retroarch_entry(existing: list[EmulatorEntry]) -> EmulatorEntry | None:
+    """Return the installed RetroArch entry, or None."""
+    for item in existing:
+        if item.catalog_id == "retroarch" or item.name.lower() == "retroarch":
+            return item
+    return None
+
+
+def retroarch_exe_path(existing: list[EmulatorEntry]) -> Path | None:
+    """Return the path to retroarch.exe if installed and present on disk."""
+    ra = find_retroarch_entry(existing)
+    if not ra or not ra.path:
+        return None
+    p = Path(ra.path)
+    if p.exists():
+        return p
+    default = _retroarch_default_dir() / "retroarch.exe"
+    if default.exists():
+        return default
+    return None
+
+
+def retroarch_install_dir(existing: list[EmulatorEntry]) -> Path | None:
+    """Return RetroArch's root directory."""
+    ra = find_retroarch_entry(existing)
+    if ra and ra.install_dir and Path(ra.install_dir).exists():
+        return Path(ra.install_dir)
+    if ra and ra.path:
+        parent = Path(ra.path).parent
+        if parent.exists():
+            return parent
+    default = _retroarch_default_dir()
+    if default.exists():
+        return default
+    return None
+
+
+def ensure_retroarch_installed(existing: list[EmulatorEntry]) -> InstallResult:
+    """Install RetroArch if it is not already present.
+
+    Returns an InstallResult with the RetroArch EmulatorEntry on success.
+    """
+    ra = find_retroarch_entry(existing)
+    if ra and ra.path and Path(ra.path).exists():
+        return InstallResult(True, "RetroArch is already installed.", ra)
+
+    catalog = EMULATOR_CATALOG_BY_ID.get("retroarch")
+    if not catalog:
+        return InstallResult(False, "RetroArch catalog entry not found.")
+
+    return install_emulator(catalog, existing)
+
+
+def update_retroarch(existing: list[EmulatorEntry]) -> InstallResult:
+    """Re-install RetroArch to get the latest pinned stable version."""
+    catalog = EMULATOR_CATALOG_BY_ID.get("retroarch")
+    if not catalog:
+        return InstallResult(False, "RetroArch catalog entry not found.")
+    return install_emulator(catalog, existing)
+
+
+def retroarch_cores_dir(existing: list[EmulatorEntry]) -> Path | None:
+    """``<project>/emulators/cores/`` — shared directory for all core DLLs.
+
+    Cores are stored under ``emulators/`` separately from RetroArch itself
+    so the RetroArch folder stays clean and cores live alongside other
+    emulator data.
+    """
+    ra = find_retroarch_entry(existing)
+    if not ra:
+        return None
+    cores = emulators_root() / "cores"
+    cores.mkdir(parents=True, exist_ok=True)
+    return cores
+
+
+# ---------------------------------------------------------------------------
+# Core management
+# ---------------------------------------------------------------------------
+
 def download_single_retroarch_core(dll_name: str, cores_dir: Path) -> Path | None:
-    """Download a single RetroArch core DLL into *cores_dir* without
-    removing other cores that already live there."""
+    """Download a single RetroArch core DLL into *cores_dir*."""
+    import time as _time
+
     cores_dir.mkdir(parents=True, exist_ok=True)
-    core_zip_url = (
-        f"https://buildbot.libretro.com/nightly/windows/x86_64/latest/{dll_name}.zip"
-    )
+    core_zip_url = f"{_RETROARCH_BUILDBOT_NIGHTLY}/{dll_name}.zip"
     try:
         zip_path = _download_asset(core_zip_url, f"{dll_name}.zip")
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(cores_dir)
         _safe_delete_file(zip_path)
         core_path = cores_dir / dll_name
-        return core_path if core_path.exists() else None
+        if core_path.exists():
+            # Set the mtime to now so core_has_update() doesn't falsely
+            # report an update — zipfile.extractall() preserves the archive's
+            # internal timestamps which are older than the server's Last-Modified.
+            now = _time.time()
+            import os as _os
+            _os.utime(core_path, (now, now))
+            return core_path
+        return None
     except Exception:
         return None
 
 
-def install_emulator(entry: EmulatorCatalogEntry, existing: list[EmulatorEntry]) -> InstallResult:
-    """Install one emulator entry into Meridian/emulators/<entry.install_subdir>."""
+def core_has_update(
+    catalog_entry: EmulatorCatalogEntry,
+    existing: list[EmulatorEntry],
+) -> bool:
+    """Check if a newer nightly build of a RetroArch core exists.
+
+    Compares the local DLL's modification time against the remote server's
+    ``Last-Modified`` header via a lightweight HTTP HEAD request.
+    Returns False if the core isn't installed or the check fails.
+    """
+    import email.utils
+    dll_name = catalog_entry.core_filename
+    if not dll_name:
+        return False
+    cores = retroarch_cores_dir(existing)
+    if not cores:
+        return False
+    local_path = cores / dll_name
+    if not local_path.exists():
+        return False
+
+    url = f"{_RETROARCH_BUILDBOT_NIGHTLY}/{dll_name}.zip"
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers=_HTTP_HEADERS)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            lm = resp.headers.get("Last-Modified", "")
+            if not lm:
+                return False
+            remote_ts = email.utils.parsedate_to_datetime(lm).timestamp()
+            local_ts = local_path.stat().st_mtime
+            return remote_ts > local_ts
+    except Exception:
+        return False
+
+
+def update_retroarch_core(
+    catalog_entry: EmulatorCatalogEntry,
+    existing: list[EmulatorEntry],
+) -> InstallResult:
+    """Re-download a RetroArch core to get the latest nightly build."""
+    dll_name = catalog_entry.core_filename
+    if not dll_name:
+        return InstallResult(False, f"No core filename for {catalog_entry.name}.")
+
+    cores = retroarch_cores_dir(existing)
+    if not cores:
+        return InstallResult(False, "RetroArch is not installed.")
+
+    core_path = download_single_retroarch_core(dll_name, cores)
+    if core_path:
+        return InstallResult(True, f"Updated {catalog_entry.name} core.")
+    return InstallResult(False, f"Failed to download {dll_name}.")
+
+
+def delete_retroarch_core(
+    catalog_entry: EmulatorCatalogEntry,
+    existing: list[EmulatorEntry],
+) -> tuple[bool, str]:
+    """Delete a RetroArch core DLL from disk.
+
+    Returns (success, error_message).
+    """
+    dll_name = catalog_entry.core_filename
+    if not dll_name:
+        return True, ""
+
+    cores = retroarch_cores_dir(existing)
+    if not cores:
+        return True, "RetroArch cores directory not found (nothing to delete)."
+
+    target = cores / dll_name
+    if not target.exists():
+        return True, ""
+    try:
+        target.unlink()
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def check_core_installed(
+    catalog_entry: EmulatorCatalogEntry,
+    existing: list[EmulatorEntry],
+) -> bool:
+    """Return True if the core DLL exists on disk."""
+    dll_name = catalog_entry.core_filename
+    if not dll_name:
+        return False
+    cores = retroarch_cores_dir(existing)
+    if not cores:
+        return False
+    return (cores / dll_name).exists()
+
+
+# ---------------------------------------------------------------------------
+# Main install dispatcher
+# ---------------------------------------------------------------------------
+
+def install_emulator(
+    entry: EmulatorCatalogEntry,
+    existing: list[EmulatorEntry],
+) -> InstallResult:
+    """Install one emulator entry (standalone or RetroArch core)."""
     if entry.install_strategy == "manual":
         reason = entry.notes or "No automated Windows installer is available."
-        return InstallResult(False, f"Manual install required for {entry.name}: {reason}")
+        return InstallResult(
+            False, f"Manual install required for {entry.name}: {reason}"
+        )
 
     if entry.install_strategy == "retroarch_core":
         return _install_retroarch_core(entry, existing)
 
     if not entry.windows_supported:
-        return InstallResult(False, f"{entry.name} does not have an automated Windows installer.")
+        return InstallResult(
+            False, f"{entry.name} does not have an automated Windows installer."
+        )
 
     try:
         release = _resolve_latest_stable_release(entry)
         ranked_assets = _rank_assets(entry, release.assets)
         if not ranked_assets:
-            return InstallResult(False, f"No matching Windows asset found for {entry.name}.")
+            return InstallResult(
+                False, f"No matching Windows asset found for {entry.name}."
+            )
 
-        install_dir = emulators_root() / (entry.install_subdir or entry.id)
+        # RetroArch gets its own top-level folder; everything else
+        # goes under emulators/.
+        if entry.id == "retroarch":
+            install_dir = _retroarch_default_dir()
+        else:
+            install_dir = emulators_root() / (entry.install_subdir or entry.id)
         exe_path: Path | None = None
         resolved_install_dir = install_dir
         last_error = ""
@@ -111,12 +321,10 @@ def install_emulator(entry: EmulatorCatalogEntry, existing: list[EmulatorEntry])
             _run_windows_installer(download_file, install_dir)
             exe_path = _detect_executable(install_dir, entry.exe_candidates)
             if not exe_path:
-                # Some installer packages ignore /DIR and install to a registry-defined location.
                 exe_path = _detect_installer_executable_windows(entry)
                 if exe_path:
                     resolved_install_dir = exe_path.parent
         else:
-            # Try multiple candidate assets until one produces a working executable.
             for asset in ranked_assets[:10]:
                 try:
                     download_file = _download_asset(asset.download_url, asset.name)
@@ -124,11 +332,15 @@ def install_emulator(entry: EmulatorCatalogEntry, existing: list[EmulatorEntry])
                     exe_path = _detect_executable(install_dir, entry.exe_candidates)
                     if exe_path:
                         break
-                    last_error = f"Asset '{asset.name}' did not contain a runnable executable."
+                    last_error = (
+                        f"Asset '{asset.name}' did not contain a runnable executable."
+                    )
                 except Exception as exc:
                     last_error = f"Asset '{asset.name}' failed: {exc}"
                 finally:
-                    _safe_delete_file(download_file if "download_file" in locals() else None)
+                    _safe_delete_file(
+                        download_file if "download_file" in locals() else None
+                    )
 
         if not exe_path:
             return InstallResult(
@@ -146,62 +358,93 @@ def install_emulator(entry: EmulatorCatalogEntry, existing: list[EmulatorEntry])
             install_dir=str(resolved_install_dir),
             provider=entry.release_provider,
         )
-        return InstallResult(True, f"Installed {entry.name} ({release.tag}).", emu_entry, release.tag)
+        return InstallResult(
+            True, f"Installed {entry.name} ({release.tag}).", emu_entry, release.tag
+        )
     except Exception as exc:
         return InstallResult(False, f"Failed to install {entry.name}: {exc}")
 
 
-def _install_retroarch_core(entry: EmulatorCatalogEntry, existing: list[EmulatorEntry]) -> InstallResult:
-    dll_name = _RETROARCH_CORE_DLLS.get(entry.id)
+# ---------------------------------------------------------------------------
+# RetroArch core installation
+# ---------------------------------------------------------------------------
+
+def _install_retroarch_core(
+    entry: EmulatorCatalogEntry,
+    existing: list[EmulatorEntry],
+) -> InstallResult:
+    """Install a RetroArch core and create an individual EmulatorEntry for it."""
+    dll_name = entry.core_filename
     if not dll_name:
-        return InstallResult(False, f"Unknown RetroArch core mapping for {entry.name}.")
+        return InstallResult(False, f"No core filename for {entry.name}.")
 
-    retroarch = _find_existing_retroarch(existing)
-    if not retroarch or not retroarch.path:
-        return InstallResult(
-            False,
-            f"Install RetroArch first, then install {entry.name}.",
-        )
+    # Ensure RetroArch is installed first
+    ra = find_retroarch_entry(existing)
+    if not ra or not ra.path or not Path(ra.path).exists():
+        ra_result = ensure_retroarch_installed(existing)
+        if not ra_result.ok:
+            return InstallResult(
+                False,
+                f"RetroArch must be installed first. {ra_result.message}",
+            )
+        ra = ra_result.entry
 
-    retroarch_root = Path(retroarch.install_dir) if retroarch.install_dir else Path(retroarch.path).parent
-    cores_dir = retroarch_root / "cores"
+    if not ra or not ra.path:
+        return InstallResult(False, "RetroArch installation not found.")
+
+    ra_root = Path(ra.install_dir) if ra.install_dir else Path(ra.path).parent
+    cores_dir = emulators_root() / "cores"
 
     try:
         core_dll = download_single_retroarch_core(dll_name, cores_dir)
         if not core_dll:
-            return InstallResult(False, f"Failed to download RetroArch core {dll_name}.")
+            return InstallResult(
+                False, f"Failed to download RetroArch core {dll_name}."
+            )
 
-        if retroarch.args.strip() == '"{rom}"':
-            retroarch.args = '-L "{core}" "{rom}"'
-
+        # Build an individual EmulatorEntry for this core.
+        # install_dir points to RetroArch so launch logic can find it,
+        # but the core DLL lives under emulators/cores/.
+        core_entry = EmulatorEntry(
+            name=entry.name,
+            path=str(Path(ra.path)),
+            args='-L "{core}" "{rom}"',
+            catalog_id=entry.id,
+            version="latest",
+            install_dir=str(ra_root),
+            provider="retroarch_core",
+        )
         for system_id in entry.systems:
-            retroarch.system_overrides[system_id] = dll_name
+            core_entry.system_overrides[system_id] = dll_name
 
         return InstallResult(
             True,
-            f"Installed RetroArch core {entry.name} and mapped systems: {', '.join(entry.systems)}.",
-            retroarch,
-            "latest",
+            f"Installed {entry.name} core ({dll_name}).",
+            core_entry,
+            "nightly",
         )
     except Exception as exc:
-        return InstallResult(False, f"Failed to install RetroArch core {entry.name}: {exc}")
+        return InstallResult(
+            False, f"Failed to install RetroArch core {entry.name}: {exc}"
+        )
 
 
-def _find_existing_retroarch(entries: list[EmulatorEntry]) -> EmulatorEntry | None:
-    for item in entries:
-        if item.catalog_id == "retroarch" or item.name.lower() == "retroarch":
-            return item
-    return None
-
+# ---------------------------------------------------------------------------
+# Release resolution
+# ---------------------------------------------------------------------------
 
 def _resolve_latest_stable_release(entry: EmulatorCatalogEntry) -> ReleaseInfo:
     if entry.release_provider == "direct":
         url = (entry.preferred_download_url or entry.release_source or "").strip()
         if not url:
-            raise RuntimeError(f"No direct download URL configured for {entry.name}.")
+            raise RuntimeError(
+                f"No direct download URL configured for {entry.name}."
+            )
         file_name = _asset_name_from_url(url)
         tag = entry.preferred_version or "pinned"
-        return ReleaseInfo(tag=tag, assets=[ReleaseAsset(name=file_name, download_url=url)])
+        return ReleaseInfo(
+            tag=tag, assets=[ReleaseAsset(name=file_name, download_url=url)]
+        )
 
     if entry.release_provider != "github" or not entry.release_source:
         raise RuntimeError(f"Unsupported release provider for {entry.name}")
@@ -212,7 +455,9 @@ def _resolve_latest_stable_release(entry: EmulatorCatalogEntry) -> ReleaseInfo:
         with urllib.request.urlopen(req, timeout=30) as res:
             payload = json.loads(res.read().decode("utf-8"))
     except HTTPError as exc:
-        raise RuntimeError(f"Release lookup failed ({exc.code}) for {entry.release_source}.") from exc
+        raise RuntimeError(
+            f"Release lookup failed ({exc.code}) for {entry.release_source}."
+        ) from exc
 
     if not isinstance(payload, list) or not payload:
         raise RuntimeError("No releases available.")
@@ -238,7 +483,13 @@ def _resolve_latest_stable_release(entry: EmulatorCatalogEntry) -> ReleaseInfo:
     return ReleaseInfo(tag=tag, assets=assets)
 
 
-def _rank_assets(entry: EmulatorCatalogEntry, assets: list[ReleaseAsset]) -> list[ReleaseAsset]:
+# ---------------------------------------------------------------------------
+# Asset ranking
+# ---------------------------------------------------------------------------
+
+def _rank_assets(
+    entry: EmulatorCatalogEntry, assets: list[ReleaseAsset]
+) -> list[ReleaseAsset]:
     if not assets:
         return []
     include = [s.lower() for s in entry.asset_include]
@@ -270,8 +521,6 @@ def _rank_assets(entry: EmulatorCatalogEntry, assets: list[ReleaseAsset]) -> lis
         elif name.endswith(".exe"):
             score += 15
 
-        # Prefer x86-64 assets — match "x64", "x86_64", "x86-64", "win64"
-        # but do NOT match "arm64" (already excluded above).
         if "x64" in name or "x86_64" in name or "x86-64" in name or "win64" in name:
             score += 10
         if "windows" in name or "win" in name:
@@ -291,6 +540,10 @@ def _is_supported_installer_or_archive(asset_name: str) -> bool:
         or asset_name.endswith(".tgz")
     )
 
+
+# ---------------------------------------------------------------------------
+# Download / extraction helpers
+# ---------------------------------------------------------------------------
 
 def _download_asset(url: str, filename: str) -> Path:
     download_dir = emulators_root() / "_downloads"
@@ -350,11 +603,10 @@ def _install_archive(archive_path: Path, install_dir: Path) -> None:
         except Exception as exc:
             py7zr_error = exc
 
-        # Fallback for codecs unsupported by py7zr (e.g. BCJ2 in some archives).
-        seven_zip = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+        seven_zip = _find_or_download_7za()
         if seven_zip:
             result = subprocess.run(
-                [seven_zip, "x", str(archive_path), f"-o{install_dir}", "-y"],
+                [str(seven_zip), "x", str(archive_path), f"-o{install_dir}", "-y"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -363,43 +615,74 @@ def _install_archive(archive_path: Path, install_dir: Path) -> None:
                 return
             output = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(
-                "7z extraction failed. "
+                f"7z extraction failed. "
                 f"py7zr error: {py7zr_error}. "
-                f"{Path(seven_zip).name} output: {output or 'unknown error'}"
+                f"7za output: {output or 'unknown error'}"
             )
 
         raise RuntimeError(
-            "7z extraction failed and no external 7-Zip CLI was found. "
-            f"py7zr error: {py7zr_error}. "
-            "Install 7-Zip and ensure `7z` is available in PATH, then retry."
+            "7z extraction failed and no 7-Zip tool could be obtained. "
+            f"py7zr error: {py7zr_error}"
         )
     raise RuntimeError(f"Unsupported archive format: {archive_path.name}")
 
 
+# URL for the official standalone 7za.exe packaged as a .zip (works with
+# Python's built-in zipfile).  This is used when py7zr cannot handle
+# certain codecs (e.g. BCJ2 in RetroArch archives) and no system 7-Zip
+# is installed.
+_7ZA_ZIP_URL = "https://www.7-zip.org/a/7za920.zip"
+
+
+def _find_or_download_7za() -> Path | None:
+    """Locate an existing 7z CLI, or download 7za.exe into the project."""
+    # Check system PATH first
+    system_7z = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+    if system_7z:
+        return Path(system_7z)
+
+    # Check our own tools directory
+    tools_dir = project_root() / "tools"
+    local_7za = tools_dir / "7za.exe"
+    if local_7za.exists():
+        return local_7za
+
+    # Download 7za.exe from the official 7-Zip site
+    log.info("Downloading 7za.exe for .7z extraction support...")
+    try:
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        zip_dest = tools_dir / "7za920.zip"
+        req = urllib.request.Request(
+            _7ZA_ZIP_URL,
+            headers={"User-Agent": "Meridian-Installer/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=30) as res:
+            zip_dest.write_bytes(res.read())
+        with zipfile.ZipFile(zip_dest, "r") as zf:
+            zf.extract("7za.exe", tools_dir)
+        _safe_delete_file(zip_dest)
+        if local_7za.exists():
+            log.info("7za.exe downloaded to %s", local_7za)
+            return local_7za
+    except Exception as exc:
+        log.warning("Failed to download 7za.exe: %s", exc)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Windows installer helpers
+# ---------------------------------------------------------------------------
+
 def _run_windows_installer(installer_path: Path, install_dir: Path) -> None:
     """Run a Windows installer interactively with install_dir pre-filled."""
-    # Keep this directory available so installers can default to it.
-    # We intentionally do not delete existing installs before a manual setup flow.
     install_dir.mkdir(parents=True, exist_ok=True)
 
     commands = [
-        # Inno Setup style (interactive wizard + default directory override)
-        [
-            str(installer_path),
-            "/CURRENTUSER",
-            f"/DIR={install_dir}",
-        ],
-        # Inno Setup style (without CURRENTUSER fallback)
-        [
-            str(installer_path),
-            f"/DIR={install_dir}",
-        ],
-        # NSIS style (interactive unless /S is provided)
-        [
-            str(installer_path),
-            f"/D={install_dir}",
-        ],
-        # Last-resort: run installer with no args at all.
+        [str(installer_path), "/CURRENTUSER", f"/DIR={install_dir}"],
+        [str(installer_path), f"/DIR={install_dir}"],
+        [str(installer_path), f"/D={install_dir}"],
         [str(installer_path)],
     ]
 
@@ -414,7 +697,6 @@ def _run_windows_installer(installer_path: Path, install_dir: Path) -> None:
                 timeout=600,
             )
         except OSError as exc:
-            # Elevation required (WinError 740). Retry once via runas.
             if getattr(exc, "winerror", None) == 740:
                 _run_elevated_process(cmd)
                 return
@@ -476,6 +758,10 @@ def _ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+# ---------------------------------------------------------------------------
+# Executable detection
+# ---------------------------------------------------------------------------
+
 def _detect_executable(install_dir: Path, exe_candidates: list[str]) -> Path | None:
     for candidate in exe_candidates:
         direct = install_dir / candidate
@@ -487,7 +773,6 @@ def _detect_executable(install_dir: Path, exe_candidates: list[str]) -> Path | N
         if file_path.name.lower() in lowered:
             return file_path
 
-    # Fallback: first executable found
     for file_path in install_dir.rglob("*.exe"):
         return file_path
     return None
@@ -518,7 +803,9 @@ def _detect_installer_executable_windows(entry: EmulatorCatalogEntry) -> Path | 
                         subkey_name = winreg.EnumKey(base, idx)
                         with winreg.OpenKey(base, subkey_name) as sub:
                             display_name = _read_reg_str(sub, "DisplayName").lower()
-                            if not display_name or not any(token in display_name for token in name_tokens):
+                            if not display_name or not any(
+                                token in display_name for token in name_tokens
+                            ):
                                 continue
 
                             install_location = _read_reg_str(sub, "InstallLocation")
@@ -526,14 +813,20 @@ def _detect_installer_executable_windows(entry: EmulatorCatalogEntry) -> Path | 
 
                             if install_location:
                                 install_path = Path(install_location.strip('"'))
-                                exe = _detect_executable(install_path, entry.exe_candidates)
+                                exe = _detect_executable(
+                                    install_path, entry.exe_candidates
+                                )
                                 if exe:
                                     return exe
                             if display_icon:
-                                # DisplayIcon may look like: "C:\Path\App.exe,0"
-                                icon_path = display_icon.split(",")[0].strip().strip('"')
+                                icon_path = (
+                                    display_icon.split(",")[0].strip().strip('"')
+                                )
                                 icon_exe = Path(icon_path)
-                                if icon_exe.exists() and icon_exe.suffix.lower() == ".exe":
+                                if (
+                                    icon_exe.exists()
+                                    and icon_exe.suffix.lower() == ".exe"
+                                ):
                                     return icon_exe
                     except Exception:
                         continue
